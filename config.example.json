@@ -1,0 +1,18 @@
+{
+  "listen": "127.0.0.1:18080",
+  "publicUrl": "https://relay.example.com/apiws",
+  "tokens": [
+    {
+      "name": "phone",
+      "hash": "sha256:replace-with-output-of-tgproxy-relay-print-token-hash"
+    }
+  ],
+  "telegram": {
+    "connectTimeoutMs": 7000,
+    "idleTimeoutSec": 125,
+    "dcMap": {
+      "2": "149.154.167.220",
+      "4": "149.154.167.220"
+    }
+  }
+}

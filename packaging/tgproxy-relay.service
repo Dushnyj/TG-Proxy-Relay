@@ -1,0 +1,23 @@
+[Unit]
+Description=TG Proxy VPS Relay
+Documentation=https://github.com/Dushnyj/TG-Proxy-Relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tgproxy-relay
+Group=tgproxy-relay
+ExecStart=/opt/tgproxy-relay/tgproxy-relay -config /etc/tgproxy-relay/config.json
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/tgproxy-relay
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

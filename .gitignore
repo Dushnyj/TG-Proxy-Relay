@@ -1,0 +1,8 @@
+.idea/
+.vscode/
+*.log
+*.tmp
+dist/
+release-artifacts/
+/tgproxy-relay
+tgproxy-relay.exe
