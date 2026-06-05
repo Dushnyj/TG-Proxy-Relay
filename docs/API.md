@@ -45,7 +45,7 @@ GET /version
 ```json
 {
   "name": "tgproxy-relay",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "protocol": 1,
   "minAppProtocol": 1
 }
@@ -69,8 +69,11 @@ Content-Type: application/json
 ```json
 {
   "dcs": [
-    { "dc": 2, "ip": "149.154.167.220" },
-    { "dc": 4, "ip": "149.154.167.220" }
+    { "dc": 1, "ip": "149.154.175.50" },
+    { "dc": 2, "ip": "149.154.167.51" },
+    { "dc": 3, "ip": "149.154.175.100" },
+    { "dc": 4, "ip": "149.154.167.91" },
+    { "dc": 5, "ip": "149.154.171.5" }
   ]
 }
 ```
@@ -80,8 +83,12 @@ Content-Type: application/json
 ```text
 DC2 main OK
 DC2 media OK
+DC3 main OK
+DC3 media OK
 DC4 main OK
 DC4 media OK
+DC5 main OK
+DC5 media OK
 ```
 
 Если Relay опубликован под `/apiws`, reverse proxy должен отдавать:

@@ -56,3 +56,14 @@ func TestValidateRejectsMissingTokens(t *testing.T) {
 		t.Fatal("expected missing tokens to be rejected")
 	}
 }
+
+func TestDefaultTelegramDCMapUsesRawMtProtoAddresses(t *testing.T) {
+	cfg := config.Default()
+
+	if got := cfg.Telegram.AddressForDC(2); got != "149.154.167.51:443" {
+		t.Fatalf("dc2 address mismatch: %q", got)
+	}
+	if got := cfg.Telegram.AddressForDC(4); got != "149.154.167.91:443" {
+		t.Fatalf("dc4 address mismatch: %q", got)
+	}
+}
