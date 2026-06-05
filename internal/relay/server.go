@@ -19,7 +19,7 @@ const (
 	MinAppProtocol = 1
 )
 
-var Version = "1.0.1"
+var Version = "1.0.2"
 
 type Dialer interface {
 	DialContext(ctx context.Context, network string, address string) (net.Conn, error)

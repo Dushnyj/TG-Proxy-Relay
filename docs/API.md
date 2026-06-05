@@ -45,7 +45,7 @@ GET /version
 ```json
 {
   "name": "tgproxy-relay",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "protocol": 1,
   "minAppProtocol": 1
 }
@@ -73,7 +73,8 @@ Content-Type: application/json
     { "dc": 2, "ip": "149.154.167.51" },
     { "dc": 3, "ip": "149.154.175.100" },
     { "dc": 4, "ip": "149.154.167.91" },
-    { "dc": 5, "ip": "149.154.171.5" }
+    { "dc": 5, "ip": "149.154.171.5" },
+    { "dc": 203, "ip": "91.105.192.100" }
   ]
 }
 ```

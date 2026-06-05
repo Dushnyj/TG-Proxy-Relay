@@ -17,7 +17,7 @@ Relay может работать IP-only без HTTPS для тестов, но
 mkdir -p /opt/tgproxy-relay
 cd /opt/tgproxy-relay
 curl -L -o relay.tar.gz \
-  https://github.com/Dushnyj/TG-Proxy-Relay/releases/download/v1.0.1/TG-Proxy-Relay-v1.0.1-linux-amd64.tar.gz
+  https://github.com/Dushnyj/TG-Proxy-Relay/releases/download/v1.0.2/TG-Proxy-Relay-v1.0.2-linux-amd64.tar.gz
 tar -xzf relay.tar.gz
 chmod +x tgproxy-relay
 ```
@@ -62,7 +62,8 @@ nano /etc/tgproxy-relay/config.json
       "2": "149.154.167.51",
       "3": "149.154.175.100",
       "4": "149.154.167.91",
-      "5": "149.154.171.5"
+      "5": "149.154.171.5",
+      "203": "91.105.192.100"
     }
   }
 }
