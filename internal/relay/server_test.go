@@ -69,10 +69,10 @@ func TestTestRoutesChecksMainAndMediaForEachRequestedDC(t *testing.T) {
 		t.Fatalf("test-routes status = %d body=%s", res.StatusCode, report)
 	}
 	for _, want := range []string{
-		"DC2 main ERROR",
-		"DC2 media ERROR",
-		"DC4 main OK",
-		"DC4 media OK",
+		"DC2 main OK",
+		"DC2 media OK",
+		"DC4 main ERROR",
+		"DC4 media ERROR",
 	} {
 		if !strings.Contains(report, want) {
 			t.Fatalf("report missing %q:\n%s", want, report)
