@@ -77,12 +77,43 @@ func TestWebSocketBridgeAcceptsLargeBinaryFrames(t *testing.T) {
 	}
 }
 
+func TestWebSocketBridgeClosesIdleConnectionAfterConfiguredTimeout(t *testing.T) {
+	appSide, telegramSide := net.Pipe()
+	defer telegramSide.Close()
+	server := newBridgeTestServerWithConfig(t, appSide, func(cfg *config.Config) {
+		cfg.Telegram.IdleTimeoutSec = 1
+	})
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+
+	wsConn := dialWebSocket(t, ts.URL, "/apiws?dc=2&media=0", "phone-token")
+	defer wsConn.Close()
+
+	if err := wsConn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	_, err := wsConn.Read(make([]byte, 1))
+	if err == nil {
+		t.Fatal("expected idle websocket connection to close")
+	}
+	if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+		t.Fatal("idle websocket stayed open until test read deadline")
+	}
+}
+
 func newBridgeTestServer(t *testing.T, telegramConn net.Conn) *relay.Server {
+	return newBridgeTestServerWithConfig(t, telegramConn, nil)
+}
+
+func newBridgeTestServerWithConfig(t *testing.T, telegramConn net.Conn, mutate func(*config.Config)) *relay.Server {
 	t.Helper()
 	cfg := config.Default()
 	cfg.Listen = "127.0.0.1:0"
 	cfg.Tokens = []config.Token{{Name: "phone", Hash: config.TokenHash("phone-token")}}
 	cfg.Telegram.DCMap = map[int]string{2: "149.154.167.220"}
+	if mutate != nil {
+		mutate(&cfg)
+	}
 	server, err := relay.NewServer(cfg, relay.WithDialer(singleConnDialer{conn: telegramConn}))
 	if err != nil {
 		t.Fatal(err)

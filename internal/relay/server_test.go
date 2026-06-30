@@ -15,7 +15,7 @@ import (
 )
 
 func TestHealthAndVersionRequireTokenAndReturnProtocol(t *testing.T) {
-	server := newTestServer(t, fakeDialer{})
+	server := newTestServer(t, &fakeDialer{})
 	ts := httptest.NewServer(server.Handler())
 	defer ts.Close()
 
@@ -47,8 +47,8 @@ func TestHealthAndVersionRequireTokenAndReturnProtocol(t *testing.T) {
 }
 
 func TestTestRoutesChecksMainAndMediaForEachRequestedDC(t *testing.T) {
-	dialer := fakeDialer{
-		fail: map[string]bool{"149.154.167.220:443": true},
+	dialer := &fakeDialer{
+		fail: map[string]bool{"149.154.167.221:443": true},
 	}
 	server := newTestServer(t, dialer)
 	ts := httptest.NewServer(server.Handler())
@@ -80,7 +80,40 @@ func TestTestRoutesChecksMainAndMediaForEachRequestedDC(t *testing.T) {
 	}
 }
 
-func newTestServer(t *testing.T, dialer fakeDialer) *relay.Server {
+func TestTestRoutesUsesOnlyConfiguredTelegramDCAddresses(t *testing.T) {
+	dialer := &fakeDialer{}
+	server := newTestServer(t, dialer)
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+
+	body := strings.NewReader(`{"dcs":[{"dc":2,"ip":"10.0.0.1"},{"dc":99,"ip":"203.0.113.10"}]}`)
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/test-routes", body)
+	req.Header.Set("Authorization", "Bearer phone-token")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	reportBytes, _ := io.ReadAll(res.Body)
+	report := string(reportBytes)
+
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("test-routes status = %d body=%s", res.StatusCode, report)
+	}
+	for _, forbidden := range []string{"10.0.0.1:443", "203.0.113.10:443"} {
+		if dialer.called(forbidden) {
+			t.Fatalf("test-routes dialed client supplied address %s", forbidden)
+		}
+	}
+	if !strings.Contains(report, "DC2 main OK") {
+		t.Fatalf("configured DC was not checked:\n%s", report)
+	}
+	if !strings.Contains(report, "DC99 main ERROR unknown dc") {
+		t.Fatalf("unknown DC was not rejected clearly:\n%s", report)
+	}
+}
+
+func newTestServer(t *testing.T, dialer *fakeDialer) *relay.Server {
 	t.Helper()
 	cfg := config.Default()
 	cfg.Listen = "127.0.0.1:0"
@@ -111,11 +144,13 @@ func getStatus(t *testing.T, url string, auth string) int {
 }
 
 type fakeDialer struct {
-	fail map[string]bool
-	conn net.Conn
+	fail      map[string]bool
+	conn      net.Conn
+	addresses []string
 }
 
-func (d fakeDialer) DialContext(_ context.Context, _, address string) (net.Conn, error) {
+func (d *fakeDialer) DialContext(_ context.Context, _, address string) (net.Conn, error) {
+	d.addresses = append(d.addresses, address)
 	if d.fail[address] {
 		return nil, errDialFailed(address)
 	}
@@ -127,6 +162,15 @@ func (d fakeDialer) DialContext(_ context.Context, _, address string) (net.Conn,
 		_ = server.Close()
 	}()
 	return client, nil
+}
+
+func (d fakeDialer) called(address string) bool {
+	for _, item := range d.addresses {
+		if item == address {
+			return true
+		}
+	}
+	return false
 }
 
 type errDialFailed string

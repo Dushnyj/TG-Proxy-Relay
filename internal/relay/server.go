@@ -19,7 +19,7 @@ const (
 	MinAppProtocol = 1
 )
 
-var Version = "1.0.2"
+var Version = "1.0.3"
 
 type Dialer interface {
 	DialContext(ctx context.Context, network string, address string) (net.Conn, error)
@@ -122,10 +122,7 @@ func (s *Server) handleTestRoutes(w http.ResponseWriter, r *http.Request) {
 func (s *Server) checkRoutes(ctx context.Context, req testRoutesRequest) string {
 	var out strings.Builder
 	for _, dc := range sortedDCS(req.DCS) {
-		address := routeAddress(dc.IP)
-		if address == "" {
-			address = s.cfg.Telegram.AddressForDC(dc.DC)
-		}
+		address := s.cfg.Telegram.AddressForDC(dc.DC)
 		for _, scope := range []string{"main", "media"} {
 			err := s.checkAddress(ctx, address)
 			if err != nil {
@@ -140,7 +137,7 @@ func (s *Server) checkRoutes(ctx context.Context, req testRoutesRequest) string 
 
 func (s *Server) checkAddress(parent context.Context, address string) error {
 	if address == "" {
-		return fmt.Errorf("missing address")
+		return fmt.Errorf("unknown dc")
 	}
 	timeout := time.Duration(s.cfg.Telegram.ConnectTimeoutMs) * time.Millisecond
 	ctx, cancel := context.WithTimeout(parent, timeout)

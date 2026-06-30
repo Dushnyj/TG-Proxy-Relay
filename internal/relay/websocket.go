@@ -62,11 +62,23 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	_, _ = rw.WriteString("\r\n")
 	_ = rw.Flush()
 
-	bridgeWebSocket(client, rw.Reader, telegram)
+	bridgeWebSocket(client, rw.Reader, telegram, s.idleTimeout())
 }
 
-func bridgeWebSocket(client net.Conn, reader *bufio.Reader, telegram net.Conn) {
+func (s *Server) idleTimeout() time.Duration {
+	timeout := time.Duration(s.cfg.Telegram.IdleTimeoutSec) * time.Second
+	if timeout <= 0 {
+		return 0
+	}
+	return timeout
+}
+
+func bridgeWebSocket(client net.Conn, reader *bufio.Reader, telegram net.Conn, idleTimeout time.Duration) {
 	var once sync.Once
+	writer := websocketWriter{
+		conn:        client,
+		idleTimeout: idleTimeout,
+	}
 	closeBoth := func() {
 		once.Do(func() {
 			_ = client.Close()
@@ -78,9 +90,10 @@ func bridgeWebSocket(client net.Conn, reader *bufio.Reader, telegram net.Conn) {
 		defer closeBoth()
 		buf := make([]byte, 32*1024)
 		for {
+			setReadDeadline(telegram, idleTimeout)
 			n, err := telegram.Read(buf)
 			if n > 0 {
-				if writeFrame(client, 0x2, buf[:n]) != nil {
+				if writer.writeFrame(0x2, buf[:n]) != nil {
 					return
 				}
 			}
@@ -91,6 +104,7 @@ func bridgeWebSocket(client net.Conn, reader *bufio.Reader, telegram net.Conn) {
 	}()
 
 	for {
+		setReadDeadline(client, idleTimeout)
 		opcode, payload, err := readClientFrame(reader)
 		if err != nil {
 			closeBoth()
@@ -98,18 +112,46 @@ func bridgeWebSocket(client net.Conn, reader *bufio.Reader, telegram net.Conn) {
 		}
 		switch opcode {
 		case 0x2:
+			setWriteDeadline(telegram, idleTimeout)
 			if _, err := telegram.Write(payload); err != nil {
 				closeBoth()
 				return
 			}
 		case 0x8:
-			_ = writeFrame(client, 0x8, payload)
+			_ = writer.writeFrame(0x8, payload)
 			closeBoth()
 			return
 		case 0x9:
-			_ = writeFrame(client, 0xA, payload)
+			_ = writer.writeFrame(0xA, payload)
 		}
 	}
+}
+
+type websocketWriter struct {
+	mu          sync.Mutex
+	conn        net.Conn
+	idleTimeout time.Duration
+}
+
+func (w *websocketWriter) writeFrame(opcode byte, payload []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	setWriteDeadline(w.conn, w.idleTimeout)
+	return writeFrame(w.conn, opcode, payload)
+}
+
+func setReadDeadline(conn net.Conn, timeout time.Duration) {
+	if timeout <= 0 {
+		return
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(timeout))
+}
+
+func setWriteDeadline(conn net.Conn, timeout time.Duration) {
+	if timeout <= 0 {
+		return
+	}
+	_ = conn.SetWriteDeadline(time.Now().Add(timeout))
 }
 
 func isWebSocketUpgrade(r *http.Request) bool {
