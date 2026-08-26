@@ -31,7 +31,7 @@ Telegram Android
 Публичный HTTPS-домен обычно проксирует один путь:
 
 ```text
-WS   /apiws?dc=2&media=0
+WS   /apiws?dc=2&media=0&test=0
 GET  /apiws/healthz      -> /healthz
 GET  /apiws/version      -> /version
 POST /apiws/test-routes  -> /test-routes
@@ -42,6 +42,8 @@ POST /apiws/test-routes  -> /test-routes
 ```text
 Authorization: Bearer <token>
 ```
+
+Основной WebSocket path задаётся в `websocket.path`. `/apiws` используется по умолчанию и остаётся compatibility alias при переходе на custom path.
 
 ## Релизные файлы
 

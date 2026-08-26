@@ -4,22 +4,27 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Dushnyj/TG-Proxy-Relay/internal/config"
 )
 
 const (
-	Name           = "tgproxy-relay"
-	Protocol       = 1
-	MinAppProtocol = 1
+	Name              = "tgproxy-relay"
+	Protocol          = 1
+	MinAppProtocol    = 1
+	maxTestRoutesBody = 64 * 1024
+	maxTestRouteDCs   = 32
+	maxTestRoutesTime = 15 * time.Second
 )
 
-var Version = "1.0.3"
+var Version = "1.0.5"
 
 type Dialer interface {
 	DialContext(ctx context.Context, network string, address string) (net.Conn, error)
@@ -61,12 +66,24 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/healthz", s.withAuth(s.handleHealthz))
 	mux.HandleFunc("/version", s.withAuth(s.handleVersion))
 	mux.HandleFunc("/test-routes", s.withAuth(s.handleTestRoutes))
-	mux.HandleFunc("/apiws", s.withAuth(s.handleWebSocket))
+	mux.HandleFunc(s.cfg.WebSocket.Path, s.withAuth(s.handleWebSocket))
+	// Keep the original endpoint as a compatibility alias when an installation moves to a
+	// private path. Existing clients then survive a staged server/client configuration update.
+	if s.cfg.WebSocket.Path != "/apiws" {
+		mux.HandleFunc("/apiws", s.withAuth(s.handleWebSocket))
+	}
 	return mux
 }
 
 func (s *Server) ListenAndServe() error {
-	return http.ListenAndServe(s.cfg.Listen, s.Handler())
+	server := &http.Server{
+		Addr:              s.cfg.Listen,
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       90 * time.Second,
+		MaxHeaderBytes:    32 * 1024,
+	}
+	return server.ListenAndServe()
 }
 
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
@@ -104,8 +121,14 @@ func (s *Server) handleTestRoutes(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxTestRoutesBody)
 	var req testRoutesRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
@@ -113,26 +136,90 @@ func (s *Server) handleTestRoutes(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no dc routes", http.StatusBadRequest)
 		return
 	}
+	if len(req.DCS) > maxTestRouteDCs {
+		http.Error(w, "too many dc routes", http.StatusBadRequest)
+		return
+	}
 
+	ctx, cancel := context.WithTimeout(r.Context(), maxTestRoutesTime)
+	defer cancel()
+	report, allAvailable := s.checkRoutes(ctx, req)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	report := s.checkRoutes(r.Context(), req)
+	if !allAvailable {
+		w.WriteHeader(http.StatusBadGateway)
+	}
 	_, _ = w.Write([]byte(report))
 }
 
-func (s *Server) checkRoutes(ctx context.Context, req testRoutesRequest) string {
+func (s *Server) checkRoutes(ctx context.Context, req testRoutesRequest) (string, bool) {
+	dcs := sortedDCS(req.DCS)
+	errorsByIndex := make([]error, len(dcs))
+	completedByIndex := make([]bool, len(dcs))
+	jobs := make(chan int)
+	workerCount := len(dcs)
+	if workerCount > 6 {
+		workerCount = 6
+	}
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for worker := 0; worker < workerCount; worker++ {
+		go func() {
+			defer workers.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case index, ok := <-jobs:
+					if !ok {
+						return
+					}
+					errorsByIndex[index] = s.checkAddress(
+						ctx, s.cfg.Telegram.AddressForDC(dcs[index].DC))
+					completedByIndex[index] = true
+				}
+			}
+		}()
+	}
+	for index := range dcs {
+		select {
+		case jobs <- index:
+		case <-ctx.Done():
+			for pending := index; pending < len(dcs); pending++ {
+				errorsByIndex[pending] = ctx.Err()
+				completedByIndex[pending] = true
+			}
+			close(jobs)
+			workers.Wait()
+			return formatRouteReport(dcs, errorsByIndex)
+		}
+	}
+	close(jobs)
+	workers.Wait()
+	if ctx.Err() != nil {
+		for index := range errorsByIndex {
+			if !completedByIndex[index] {
+				errorsByIndex[index] = ctx.Err()
+			}
+		}
+	}
+	return formatRouteReport(dcs, errorsByIndex)
+}
+
+func formatRouteReport(dcs []testDC, errorsByIndex []error) (string, bool) {
 	var out strings.Builder
-	for _, dc := range sortedDCS(req.DCS) {
-		address := s.cfg.Telegram.AddressForDC(dc.DC)
+	allAvailable := true
+	for index, dc := range dcs {
+		err := errorsByIndex[index]
 		for _, scope := range []string{"main", "media"} {
-			err := s.checkAddress(ctx, address)
 			if err != nil {
+				allAvailable = false
 				fmt.Fprintf(&out, "DC%d %s ERROR %s\n", dc.DC, scope, err.Error())
 			} else {
 				fmt.Fprintf(&out, "DC%d %s OK\n", dc.DC, scope)
 			}
 		}
 	}
-	return out.String()
+	return out.String(), allAvailable
 }
 
 func (s *Server) checkAddress(parent context.Context, address string) error {
@@ -159,7 +246,15 @@ type testDC struct {
 }
 
 func sortedDCS(items []testDC) []testDC {
-	copyItems := append([]testDC(nil), items...)
+	seen := make(map[int]struct{}, len(items))
+	copyItems := make([]testDC, 0, len(items))
+	for _, item := range items {
+		if _, exists := seen[item.DC]; exists {
+			continue
+		}
+		seen[item.DC] = struct{}{}
+		copyItems = append(copyItems, item)
+	}
 	sort.SliceStable(copyItems, func(i, j int) bool {
 		return copyItems[i].DC < copyItems[j].DC
 	})

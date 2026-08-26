@@ -26,6 +26,10 @@ location = /apiws {
     proxy_set_header Connection "upgrade";
     proxy_set_header Host $host;
     proxy_set_header Authorization $http_authorization;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+    proxy_buffering off;
+    proxy_request_buffering off;
 }
 
 location = /apiws/healthz {
@@ -58,7 +62,10 @@ nginx -t && systemctl reload nginx
 ```caddyfile
 relay.example.com {
     @relayWs path /apiws
-    reverse_proxy @relayWs 127.0.0.1:18080
+    reverse_proxy @relayWs 127.0.0.1:18080 {
+        flush_interval -1
+        stream_timeout 0
+    }
 
     handle /apiws/healthz {
         rewrite * /healthz

@@ -2,6 +2,32 @@
 
 Все заметные изменения TG Proxy VPS Relay фиксируются в этом файле.
 
+## [1.0.5] - 2026-08-26
+
+### Исправлено
+
+- Heartbeat принимает только Pong с точным 8-байтовым nonce последнего Ping; посторонний или устаревший Pong больше не скрывает зависший канал.
+- При штатном EOF Telegram Relay отправляет клиенту WebSocket Close `1000`, а при ошибке чтения — `1011`, прежде чем закрыть TCP.
+- Добавлены интеграционные тесты неверного Pong и корректного закрытия Telegram-направления.
+
+## [1.0.4] - 2026-08-26
+
+### Надёжность транспорта
+
+- Добавлен серверный WebSocket ping/pong с отдельными таймаутами liveness и записи.
+- Binary messages корректно собираются из continuation frames; control frames обрабатываются между фрагментами.
+- Ограничен размер WebSocket message до настраиваемых 16 MiB до выделения памяти.
+- Protocol, UTF-8 и size ошибки завершаются корректными WebSocket close codes `1002`, `1007` и `1009`; malformed/non-minimal frames отклоняются.
+- Application idle больше не закрывает рабочий туннель по умолчанию; зависший клиент обнаруживает heartbeat.
+- Upgrade принимает только согласованный binary subprotocol; HTTP server ограничивает header timeout/size и idle time.
+- Telegram TCP-соединения используют keepalive, TCP_NODELAY и увеличенные буферы для длинных media-потоков.
+- `/test-routes` возвращает HTTP 502 при любом нерабочем DC, чтобы Android не сохранял частично исправный Relay.
+- WebSocket path настраивается через `websocket.path`; при custom path `/apiws` остаётся compatibility alias для уже установленных клиентов.
+- Добавлены Telegram test DC 1-3 и query `test=0|1`; production и test адреса берутся из разных проверяемых map.
+- `/test-routes` имеет общий 15-секундный deadline и отменяет оставшиеся проверки после timeout.
+- Добавлены `-version` и `-check-config` для безопасной установки, проверки и rollback обновлений.
+- Документация reverse proxy фиксирует долгие WebSocket timeout и отключение buffering.
+
 ## [1.0.3] - 2026-06-30
 
 ### Безопасность и стабильность

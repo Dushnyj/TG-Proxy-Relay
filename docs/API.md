@@ -9,12 +9,14 @@ Authorization: Bearer <raw-token>
 ## WebSocket
 
 ```text
-GET /apiws?dc=<dc>&media=<0|1>
+GET <websocket.path>?dc=<dc>&media=<0|1>&test=<0|1>
 Upgrade: websocket
 Sec-WebSocket-Protocol: binary
 ```
 
-Relay открывает TCP-соединение к выбранному Telegram DC и прокидывает binary WebSocket frames в TCP socket.
+Relay открывает TCP-соединение к выбранному Telegram DC и прокидывает binary WebSocket messages в TCP socket. `test=0` выбирает `telegram.dcMap`, `test=1` — `telegram.testDcMap`. Для test DC допустимы 1-3. Параметр `test` необязателен для обратной совместимости, по умолчанию равен `0` и при наличии принимает только `0` или `1`.
+
+`websocket.path` по умолчанию равен `/apiws`. Если настроен другой path, сервер также принимает `/apiws` как compatibility alias. Управляющие пути `/healthz`, `/version` и `/test-routes` зарезервированы.
 
 ## Health
 
@@ -45,7 +47,7 @@ GET /version
 ```json
 {
   "name": "tgproxy-relay",
-  "version": "1.0.2",
+  "version": "1.0.5",
   "protocol": 1,
   "minAppProtocol": 1
 }
@@ -82,6 +84,8 @@ Content-Type: application/json
 Ответ plain text:
 
 ```text
+DC1 main OK
+DC1 media OK
 DC2 main OK
 DC2 media OK
 DC3 main OK
@@ -90,6 +94,8 @@ DC4 main OK
 DC4 media OK
 DC5 main OK
 DC5 media OK
+DC203 main OK
+DC203 media OK
 ```
 
 Если Relay опубликован под `/apiws`, reverse proxy должен отдавать:

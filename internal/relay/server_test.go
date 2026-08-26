@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Dushnyj/TG-Proxy-Relay/internal/config"
@@ -65,7 +66,7 @@ func TestTestRoutesChecksMainAndMediaForEachRequestedDC(t *testing.T) {
 	reportBytes, _ := io.ReadAll(res.Body)
 	report := string(reportBytes)
 
-	if res.StatusCode != http.StatusOK {
+	if res.StatusCode != http.StatusBadGateway {
 		t.Fatalf("test-routes status = %d body=%s", res.StatusCode, report)
 	}
 	for _, want := range []string{
@@ -97,7 +98,7 @@ func TestTestRoutesUsesOnlyConfiguredTelegramDCAddresses(t *testing.T) {
 	reportBytes, _ := io.ReadAll(res.Body)
 	report := string(reportBytes)
 
-	if res.StatusCode != http.StatusOK {
+	if res.StatusCode != http.StatusBadGateway {
 		t.Fatalf("test-routes status = %d body=%s", res.StatusCode, report)
 	}
 	for _, forbidden := range []string{"10.0.0.1:443", "203.0.113.10:443"} {
@@ -113,10 +114,36 @@ func TestTestRoutesUsesOnlyConfiguredTelegramDCAddresses(t *testing.T) {
 	}
 }
 
+func TestTestRoutesRejectsUnboundedRouteLists(t *testing.T) {
+	server := newTestServer(t, &fakeDialer{})
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+
+	var body strings.Builder
+	body.WriteString(`{"dcs":[`)
+	for i := 0; i < 33; i++ {
+		if i > 0 {
+			body.WriteByte(',')
+		}
+		body.WriteString(`{"dc":2}`)
+	}
+	body.WriteString(`]}`)
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/test-routes", strings.NewReader(body.String()))
+	req.Header.Set("Authorization", "Bearer phone-token")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("too many routes status = %d", res.StatusCode)
+	}
+}
+
 func newTestServer(t *testing.T, dialer *fakeDialer) *relay.Server {
 	t.Helper()
 	cfg := config.Default()
-	cfg.Listen = "127.0.0.1:0"
+	cfg.Listen = "127.0.0.1:18080"
 	cfg.Tokens = []config.Token{{Name: "phone", Hash: config.TokenHash("phone-token")}}
 	cfg.Telegram.DCMap = map[int]string{
 		2: "149.154.167.220",
@@ -127,6 +154,26 @@ func newTestServer(t *testing.T, dialer *fakeDialer) *relay.Server {
 		t.Fatal(err)
 	}
 	return server
+}
+
+func TestCustomWebSocketPathIsRegisteredWithCompatibilityAlias(t *testing.T) {
+	cfg := config.Default()
+	cfg.Listen = "127.0.0.1:18080"
+	cfg.WebSocket.Path = "/private-relay"
+	cfg.Tokens = []config.Token{{Name: "phone", Hash: config.TokenHash("phone-token")}}
+	server, err := relay.NewServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/private-relay", "/apiws"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer phone-token")
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, req)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("%s status = %d, want websocket validation 400", path, response.Code)
+		}
+	}
 }
 
 func getStatus(t *testing.T, url string, auth string) int {
@@ -144,13 +191,16 @@ func getStatus(t *testing.T, url string, auth string) int {
 }
 
 type fakeDialer struct {
+	mu        sync.Mutex
 	fail      map[string]bool
 	conn      net.Conn
 	addresses []string
 }
 
 func (d *fakeDialer) DialContext(_ context.Context, _, address string) (net.Conn, error) {
+	d.mu.Lock()
 	d.addresses = append(d.addresses, address)
+	d.mu.Unlock()
 	if d.fail[address] {
 		return nil, errDialFailed(address)
 	}
@@ -164,7 +214,9 @@ func (d *fakeDialer) DialContext(_ context.Context, _, address string) (net.Conn
 	return client, nil
 }
 
-func (d fakeDialer) called(address string) bool {
+func (d *fakeDialer) called(address string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	for _, item := range d.addresses {
 		if item == address {
 			return true

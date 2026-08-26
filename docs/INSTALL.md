@@ -17,9 +17,13 @@ Relay может работать IP-only без HTTPS для тестов, но
 mkdir -p /opt/tgproxy-relay
 cd /opt/tgproxy-relay
 curl -L -o relay.tar.gz \
-  https://github.com/Dushnyj/TG-Proxy-Relay/releases/download/v1.0.2/TG-Proxy-Relay-v1.0.2-linux-amd64.tar.gz
+  https://github.com/Dushnyj/TG-Proxy-Relay/releases/download/v1.0.5/TG-Proxy-Relay-v1.0.5-linux-amd64.tar.gz
+curl -L -o SHA256SUMS.txt \
+  https://github.com/Dushnyj/TG-Proxy-Relay/releases/download/v1.0.5/SHA256SUMS.txt
+grep 'TG-Proxy-Relay-v1.0.5-linux-amd64.tar.gz' SHA256SUMS.txt | sha256sum -c -
 tar -xzf relay.tar.gz
 chmod +x tgproxy-relay
+./tgproxy-relay -version
 ```
 
 Для ARM VPS используйте `linux-arm64`.
@@ -40,6 +44,7 @@ chmod +x tgproxy-relay
 install -d -m 0750 /etc/tgproxy-relay
 cp /opt/tgproxy-relay/config.example.json /etc/tgproxy-relay/config.json
 nano /etc/tgproxy-relay/config.json
+/opt/tgproxy-relay/tgproxy-relay -config /etc/tgproxy-relay/config.json -check-config
 ```
 
 Минимальный production-конфиг:
@@ -56,7 +61,7 @@ nano /etc/tgproxy-relay/config.json
   ],
   "telegram": {
     "connectTimeoutMs": 7000,
-    "idleTimeoutSec": 125,
+    "idleTimeoutSec": 0,
     "dcMap": {
       "1": "149.154.175.50",
       "2": "149.154.167.51",
@@ -64,10 +69,24 @@ nano /etc/tgproxy-relay/config.json
       "4": "149.154.167.91",
       "5": "149.154.171.5",
       "203": "91.105.192.100"
+    },
+    "testDcMap": {
+      "1": "149.154.175.10",
+      "2": "149.154.167.40",
+      "3": "149.154.175.117"
     }
+  },
+  "websocket": {
+    "path": "/apiws",
+    "pingIntervalSec": 25,
+    "pongTimeoutSec": 12,
+    "writeTimeoutSec": 15,
+    "maxMessageBytes": 16777216
   }
 }
 ```
+
+`websocket.path` должен быть абсолютным путём без query/fragment и совпадать с Android/reverse proxy. Пути `/healthz`, `/version` и `/test-routes` зарезервированы. После изменения всегда запускайте `-check-config` до restart.
 
 ## Systemd
 
