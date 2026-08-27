@@ -12,6 +12,8 @@ Relay принимает авторизованный WebSocket-трафик о�
 - [Установка](#установка)
 - [Reverse proxy](#reverse-proxy)
 - [Токены](#токены)
+- [Управление владельца](#управление-владельца)
+- [Ссылки подключения](#ссылки-подключения)
 - [Автонастройка из Android](#автонастройка-из-android)
 - [Документация](#документация)
 - [Сборка](#сборка)
@@ -37,11 +39,14 @@ GET  /apiws/version      -> /version
 POST /apiws/test-routes  -> /test-routes
 ```
 
-Все endpoints требуют заголовок:
+Клиентские WebSocket и служебные endpoints требуют заголовок:
 
 ```text
 Authorization: Bearer <token>
 ```
+
+Owner API использует **отдельный** owner-token. Один raw-секрет нельзя одновременно
+использовать как клиентский и owner-token.
 
 Основной WebSocket path задаётся в `websocket.path`. `/apiws` используется по умолчанию и остаётся compatibility alias при переходе на custom path.
 
@@ -77,6 +82,37 @@ tgproxy-relay -token "long-random-token" -print-token-hash
 
 Полученный hash записывается в `config.json`. Подробнее: [docs/TOKENS.md](docs/TOKENS.md).
 
+## Управление владельца
+
+Начиная с `1.1.0`, владелец VPS может из Android-приложения:
+
+- видеть существующие клиентские токены;
+- создать новый токен и получить его raw-значение один раз;
+- немедленно отозвать токен и закрыть его активные сессии;
+- видеть привязанные устройства: марку, модель, версию приложения/Android,
+  первое и последнее подключение, активные сессии, страну и город.
+
+Доступ выдаётся только отдельным owner-token из `admin.tokens`. Динамическое состояние
+хранится в `/var/lib/tgproxy-relay/state.json`; raw клиентские токены в этот файл не попадают.
+Внешнее GeoIP-определение можно отключить значением `"geoIpUrl": ""`.
+
+Контракт API и конфигурации: [docs/API.md](docs/API.md), [docs/TOKENS.md](docs/TOKENS.md).
+
+## Ссылки подключения
+
+Relay публикует landing page:
+
+```text
+GET /connect
+GET <websocket.path>/connect
+```
+
+Android создаёт HTTPS-ссылку вида
+`https://relay.example.com/apiws/connect#data=<payload>`. Fragment после `#` не отправляется
+на сервер и локально преобразуется страницей в `tgproxy://import?...`. Та же payload-модель
+используется для QR-кода, системного меню «Поделиться» и импорта из файла. SSH-данные и
+owner-token в клиентское подключение не входят.
+
 ## Автонастройка из Android
 
 TG Proxy Android умеет:
@@ -85,6 +121,8 @@ TG Proxy Android умеет:
 - найти уже установленный совместимый Relay;
 - добавить новый token в существующий Relay;
 - установить или обновить Relay, если пользователь владеет VPS;
+- сохранить SSH/owner-данные локально в зашифрованном хранилище Android;
+- управлять токенами и подключёнными устройствами;
 - импортировать подключение без SSH-данных.
 
 Подробнее: [docs/ANDROID_AUTO_SETUP.md](docs/ANDROID_AUTO_SETUP.md).

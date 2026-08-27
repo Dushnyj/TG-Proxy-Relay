@@ -13,7 +13,7 @@ curl -H "Authorization: Bearer <token>" \
 
 ```bash
 set -euo pipefail
-version=1.0.5
+version=1.1.0
 asset="TG-Proxy-Relay-v${version}-linux-amd64.tar.gz"
 base="https://github.com/Dushnyj/TG-Proxy-Relay/releases/download/v${version}"
 
@@ -41,6 +41,39 @@ rm -rf "$stage"
 ```bash
 systemctl status tgproxy-relay --no-pager
 ```
+
+## Миграция с 1.0.x на 1.1.0
+
+Старые client tokens продолжают работать. Для управления владельца добавьте отдельный
+`admin` block и каталог состояния:
+
+```bash
+install -d -o tgproxy-relay -g tgproxy-relay -m 0750 /var/lib/tgproxy-relay
+```
+
+```json
+"admin": {
+  "tokens": [
+    {"id":"owner","name":"owner","hash":"sha256:<owner-hash>"}
+  ],
+  "statePath": "/var/lib/tgproxy-relay/state.json",
+  "geoIpUrl": "https://ipwho.is/%s?lang=ru&fields=success,country,city"
+}
+```
+
+Owner hash обязан отличаться от всех client hashes. Для полного отключения внешнего GeoIP
+укажите `"geoIpUrl": ""` явно. Обновите systemd unit так, чтобы `ReadWritePaths` включал
+`/var/lib/tgproxy-relay`, затем выполните:
+
+```bash
+/opt/tgproxy-relay/tgproxy-relay -config /etc/tgproxy-relay/config.json -check-config
+systemctl daemon-reload
+systemctl restart tgproxy-relay
+```
+
+Reverse proxy должен пропускать `/apiws/admin/v1/*` и `/apiws/connect`, см.
+[REVERSE_PROXY.md](REVERSE_PROXY.md). Client token по-прежнему используется для version/health;
+owner token — только для Owner API.
 
 ## Подсказка в Android
 

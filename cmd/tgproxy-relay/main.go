@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/Dushnyj/TG-Proxy-Relay/internal/config"
 	"github.com/Dushnyj/TG-Proxy-Relay/internal/relay"
@@ -61,7 +64,9 @@ func main() {
 		return
 	}
 	log.Printf("%s %s listening on %s", relay.Name, relay.Version, cfg.Listen)
-	if err := server.ListenAndServe(); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := server.ListenAndServeContext(ctx); err != nil {
 		log.Fatal(err)
 	}
 }

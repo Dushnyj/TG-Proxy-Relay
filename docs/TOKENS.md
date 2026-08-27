@@ -1,50 +1,96 @@
-# Токены
+# Токены и права владельца
 
-Relay использует bearer tokens для WebSocket-трафика и служебных endpoints.
+Relay `1.1.0` разделяет две роли:
+
+- **client token** — WebSocket-трафик, `/healthz`, `/version`, `/test-routes`;
+- **owner token** — только `/admin/v1/*`: список, создание и отзыв client tokens,
+  просмотр привязанных устройств.
+
+Одинаковый raw-секрет или hash в обеих ролях запрещён конфиг-валидатором.
 
 ## Хранение
 
-`config.json` хранит hashes:
+`config.json` хранит только SHA-256 hashes:
 
 ```json
 {
   "tokens": [
     {
+      "id": "primary",
       "name": "phone",
       "hash": "sha256:..."
     }
-  ]
+  ],
+  "admin": {
+    "tokens": [
+      {
+        "id": "owner",
+        "name": "owner",
+        "hash": "sha256:..."
+      }
+    ],
+    "statePath": "/var/lib/tgproxy-relay/state.json",
+    "geoIpUrl": "https://ipwho.is/%s?lang=ru&fields=success,country,city"
+  }
 }
 ```
 
-Raw-token после генерации hash на сервере не нужен.
+State-файл хранит hashes динамически созданных токенов, список отозванных hashes и
+метаданные устройств. Raw client/owner tokens в него не записываются. Права файла — `0600`.
 
-## Создать hash
+## Создать client и owner hash
 
-```bash
-tgproxy-relay -token "long-random-token" -print-token-hash
-```
-
-Лучше использовать отдельный token для каждого устройства или отдельного подключения. Тогда владелец VPS сможет отозвать один token без замены всех подключений.
-
-## Ротация
-
-1. Добавьте новый token hash в `config.json`.
-2. Перезапустите Relay:
+Используйте два разных длинных случайных значения:
 
 ```bash
-systemctl restart tgproxy-relay
+tgproxy-relay -token "replace-with-random-client-token" -print-token-hash
+tgproxy-relay -token "replace-with-different-random-owner-token" -print-token-hash
 ```
 
-3. Обновите подключение в TG Proxy Android.
-4. Удалите старый token hash после миграции клиентов.
+Raw client token нужен Android-подключению. Raw owner token нужен только владельцу VPS и
+локально сохраняется Android-приложением в Android Keystore. Не включайте owner token в
+ссылку, QR-код или экспорт обычного Relay-подключения.
 
-## Отзыв
+## Управление из Android
 
-Удалите token из `config.json` и перезапустите сервис:
+Если локальный профиль содержит зашифрованный owner token, кнопка управления владельца
+вызывает Owner API. Новый client token возвращается один раз, после чего Android сохраняет
+его локально в зашифрованном виде и может поделиться клиентским подключением.
+
+Импортированный обычный client token не открывает Owner API. Наличие SSH-реквизитов или
+создание Relay через мастер дают владельцу возможность восстановить/обновить owner-настройку,
+но сами SSH-реквизиты никогда не экспортируются клиенту.
+
+## Создание и отзыв через API
 
 ```bash
-systemctl restart tgproxy-relay
+curl -X POST \
+  -H "Authorization: Bearer <owner-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Телефон семьи"}' \
+  https://relay.example.com/apiws/admin/v1/tokens
 ```
 
-Android-клиенты со старым token перестанут проходить авторизацию.
+Ответ содержит raw `secret` ровно один раз. Отзыв:
+
+```bash
+curl -X DELETE \
+  -H "Authorization: Bearer <owner-token>" \
+  https://relay.example.com/apiws/admin/v1/tokens/<token-id>
+```
+
+После успешного `204` новые подключения отклоняются, а активные сессии этого токена
+закрываются.
+
+## Ротация owner token
+
+1. Создайте новый случайный owner token и hash.
+2. Добавьте новый hash в `admin.tokens`, не удаляя старый.
+3. Выполните `-check-config` и перезапустите Relay.
+4. Сохраните новый owner token на устройстве владельца и проверьте overview.
+5. Удалите старый owner hash, снова проверьте конфиг и перезапустите сервис.
+
+## Ручная ротация client token
+
+Config-токены можно менять через `config.json` и restart. Динамические токены лучше
+создавать/отзывать Owner API: операция является durability boundary и не требует restart.

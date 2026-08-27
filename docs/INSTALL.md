@@ -16,27 +16,30 @@ Relay может работать IP-only без HTTPS для тестов, но
 ```bash
 mkdir -p /opt/tgproxy-relay
 cd /opt/tgproxy-relay
-curl -L -o relay.tar.gz \
-  https://github.com/Dushnyj/TG-Proxy-Relay/releases/download/v1.0.5/TG-Proxy-Relay-v1.0.5-linux-amd64.tar.gz
+asset=TG-Proxy-Relay-v1.1.0-linux-amd64.tar.gz
+curl -fL -o "$asset" \
+  "https://github.com/Dushnyj/TG-Proxy-Relay/releases/download/v1.1.0/$asset"
 curl -L -o SHA256SUMS.txt \
-  https://github.com/Dushnyj/TG-Proxy-Relay/releases/download/v1.0.5/SHA256SUMS.txt
-grep 'TG-Proxy-Relay-v1.0.5-linux-amd64.tar.gz' SHA256SUMS.txt | sha256sum -c -
-tar -xzf relay.tar.gz
+  https://github.com/Dushnyj/TG-Proxy-Relay/releases/download/v1.1.0/SHA256SUMS.txt
+grep " $asset$" SHA256SUMS.txt | sha256sum -c -
+tar -xzf "$asset"
 chmod +x tgproxy-relay
 ./tgproxy-relay -version
 ```
 
 Для ARM VPS используйте `linux-arm64`.
 
-## Создать token hash
+## Создать client и owner hashes
 
 Создайте длинный случайный token:
 
 ```bash
 /opt/tgproxy-relay/tgproxy-relay -token "replace-with-long-random-token" -print-token-hash
+/opt/tgproxy-relay/tgproxy-relay -token "replace-with-different-owner-token" -print-token-hash
 ```
 
-В серверный конфиг записывается только hash. Raw-token хранится в TG Proxy Android и используется для служебных запросов.
+В серверный конфиг записываются только hashes. Значения обязаны различаться. Raw client
+token хранится у подключаемого Android-клиента; raw owner token — только у владельца VPS.
 
 ## Конфиг
 
@@ -55,10 +58,22 @@ nano /etc/tgproxy-relay/config.json
   "publicUrl": "https://relay.example.com/apiws",
   "tokens": [
     {
+      "id": "primary",
       "name": "phone",
       "hash": "sha256:replace-with-token-hash"
     }
   ],
+  "admin": {
+    "tokens": [
+      {
+        "id": "owner",
+        "name": "owner",
+        "hash": "sha256:replace-with-different-owner-token-hash"
+      }
+    ],
+    "statePath": "/var/lib/tgproxy-relay/state.json",
+    "geoIpUrl": "https://ipwho.is/%s?lang=ru&fields=success,country,city"
+  },
   "telegram": {
     "connectTimeoutMs": 7000,
     "idleTimeoutSec": 0,
@@ -86,12 +101,16 @@ nano /etc/tgproxy-relay/config.json
 }
 ```
 
-`websocket.path` должен быть абсолютным путём без query/fragment и совпадать с Android/reverse proxy. Пути `/healthz`, `/version` и `/test-routes` зарезервированы. После изменения всегда запускайте `-check-config` до restart.
+`websocket.path` должен быть абсолютным путём без query/fragment и совпадать с
+Android/reverse proxy. Пути `/healthz`, `/version`, `/test-routes`, `/connect` и `/admin/*`
+зарезервированы. `geoIpUrl` можно явно задать пустой строкой, чтобы не отправлять публичные
+IP внешнему GeoIP-сервису. После изменения всегда запускайте `-check-config` до restart.
 
 ## Systemd
 
 ```bash
 useradd --system --home /nonexistent --shell /usr/sbin/nologin tgproxy-relay || true
+install -d -o tgproxy-relay -g tgproxy-relay -m 0750 /var/lib/tgproxy-relay
 cp /opt/tgproxy-relay/packaging/tgproxy-relay.service /etc/systemd/system/tgproxy-relay.service
 systemctl daemon-reload
 systemctl enable --now tgproxy-relay
@@ -116,3 +135,13 @@ curl -H "Authorization: Bearer replace-with-raw-token" \
 ```text
 ok
 ```
+
+Owner API:
+
+```bash
+curl -H "Authorization: Bearer replace-with-owner-token" \
+  https://relay.example.com/apiws/admin/v1/overview
+```
+
+Проверьте также `https://relay.example.com/apiws/connect`: должна открыться страница
+«Добавить подключение VPS Relay» без раскрытия client token в URL query.

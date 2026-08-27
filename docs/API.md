@@ -1,10 +1,13 @@
 # Relay API
 
-Все endpoints требуют:
+Клиентские WebSocket и служебные endpoints требуют:
 
 ```text
-Authorization: Bearer <raw-token>
+Authorization: Bearer <raw-client-token>
 ```
+
+Owner endpoints требуют отдельный `Authorization: Bearer <owner-token>`. Owner-token
+не принимается как клиентский, а клиентский token не принимается Owner API.
 
 ## WebSocket
 
@@ -14,9 +17,17 @@ Upgrade: websocket
 Sec-WebSocket-Protocol: binary
 ```
 
-Relay открывает TCP-соединение к выбранному Telegram DC и прокидывает binary WebSocket messages в TCP socket. `test=0` выбирает `telegram.dcMap`, `test=1` — `telegram.testDcMap`. Для test DC допустимы 1-3. Параметр `test` необязателен для обратной совместимости, по умолчанию равен `0` и при наличии принимает только `0` или `1`.
+Relay открывает TCP-соединение к выбранному Telegram DC и прокидывает binary WebSocket
+messages в TCP socket. `test=0` выбирает `telegram.dcMap`, `test=1` —
+`telegram.testDcMap`. Для test DC допустимы 1–3. Параметр `test` необязателен для
+обратной совместимости, по умолчанию равен `0` и при наличии принимает только `0` или `1`.
 
-`websocket.path` по умолчанию равен `/apiws`. Если настроен другой path, сервер также принимает `/apiws` как compatibility alias. Управляющие пути `/healthz`, `/version` и `/test-routes` зарезервированы.
+`websocket.path` по умолчанию равен `/apiws`. Если настроен другой path, сервер также
+принимает `/apiws` как compatibility alias. Пути `/healthz`, `/version`, `/test-routes`,
+`/connect` и `/admin/*` зарезервированы.
+
+Android передаёт идентификатор устройства, производителя, модель, версии приложения и
+Android в заголовках `X-TGProxy-*`. Эти поля используются только owner-overview.
 
 ## Health
 
@@ -24,17 +35,8 @@ Relay открывает TCP-соединение к выбранному Telegr
 GET /healthz
 ```
 
-Ответ:
-
-```text
-ok
-```
-
-Если Relay опубликован под `/apiws`, reverse proxy должен отдавать:
-
-```text
-GET /apiws/healthz
-```
+Ответ: `ok`. Если Relay опубликован под `/apiws`, reverse proxy должен отдавать
+`GET /apiws/healthz`.
 
 ## Version
 
@@ -47,17 +49,14 @@ GET /version
 ```json
 {
   "name": "tgproxy-relay",
-  "version": "1.0.5",
+  "version": "1.1.0",
   "protocol": 1,
-  "minAppProtocol": 1
+  "minAppProtocol": 1,
+  "ownerProtocol": 1
 }
 ```
 
-Если Relay опубликован под `/apiws`, reverse proxy должен отдавать:
-
-```text
-GET /apiws/version
-```
+Prefixed public endpoint: `GET /apiws/version`.
 
 ## Route Test
 
@@ -86,20 +85,110 @@ Content-Type: application/json
 ```text
 DC1 main OK
 DC1 media OK
-DC2 main OK
-DC2 media OK
-DC3 main OK
-DC3 media OK
-DC4 main OK
-DC4 media OK
-DC5 main OK
-DC5 media OK
+...
 DC203 main OK
 DC203 media OK
 ```
 
-Если Relay опубликован под `/apiws`, reverse proxy должен отдавать:
+Prefixed public endpoint: `POST /apiws/test-routes`.
+
+`/test-routes` выполняет coarse TCP-проверку production DC из серверной карты. Android
+дополнительно выполняет настоящий MTProto `req_pq/resPQ` для production main/media scopes;
+это разные уровни проверки.
+
+## Owner overview
 
 ```text
-POST /apiws/test-routes
+GET /admin/v1/overview
+Authorization: Bearer <owner-token>
 ```
+
+Тот же endpoint доступен под WebSocket prefix, например
+`GET /apiws/admin/v1/overview`. Ответ не содержит raw-токены:
+
+```json
+{
+  "tokens": [
+    {
+      "id": "primary",
+      "name": "Основной",
+      "createdAt": "2026-08-27T12:00:00Z",
+      "activeDevices": 1,
+      "knownDevices": 2
+    }
+  ],
+  "clients": [
+    {
+      "tokenId": "primary",
+      "deviceId": "device_...",
+      "manufacturer": "Xiaomi",
+      "model": "Redmi Note 8 Pro",
+      "appVersion": "1.1.0",
+      "appCode": "10100",
+      "android": "11",
+      "country": "Россия",
+      "city": "Москва",
+      "remoteIp": "203.0.113.10",
+      "firstSeen": "2026-08-27T12:00:00Z",
+      "lastSeen": "2026-08-27T12:05:00Z",
+      "activeSessions": 1
+    }
+  ]
+}
+```
+
+`country` и `city` отсутствуют, если GeoIP отключён, адрес непубличный или lookup не удался.
+
+## Создать клиентский токен
+
+```text
+POST /admin/v1/tokens
+Authorization: Bearer <owner-token>
+Content-Type: application/json
+
+{"name":"Телефон семьи"}
+```
+
+Ответ `201 Created`:
+
+```json
+{
+  "token": {
+    "id": "tok_...",
+    "name": "Телефон семьи",
+    "createdAt": "2026-08-27T12:00:00Z",
+    "activeDevices": 0,
+    "knownDevices": 0
+  },
+  "secret": "tgpr_..."
+}
+```
+
+Поле `secret` возвращается только при создании. Relay сохраняет только SHA-256 hash.
+
+## Отозвать клиентский токен
+
+```text
+DELETE /admin/v1/tokens/<token-id>
+Authorization: Bearer <owner-token>
+```
+
+Успех: `204 No Content`. Отзыв сначала атомарно сохраняется в state, затем Relay закрывает
+все активные сессии токена. Prefixed вариант: `/apiws/admin/v1/tokens/<token-id>`.
+
+## Landing page подключения
+
+```text
+GET /connect
+GET /apiws/connect
+```
+
+Авторизация не требуется. Рекомендуемая ссылка:
+
+```text
+https://relay.example.com/apiws/connect#data=<url-safe-base64-payload>
+```
+
+Payload находится после `#`, поэтому браузер не отправляет его Relay, nginx или журналам
+доступа. Страница проверяет алфавит и длину, затем открывает `tgproxy://import?data=...`.
+Query `?data=` принимается только для совместимости со старыми ссылками.

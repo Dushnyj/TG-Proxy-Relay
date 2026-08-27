@@ -3,10 +3,22 @@
   "publicUrl": "https://relay.example.com/apiws",
   "tokens": [
     {
+      "id": "primary",
       "name": "phone",
       "hash": "sha256:replace-with-output-of-tgproxy-relay-print-token-hash"
     }
   ],
+  "admin": {
+    "tokens": [
+      {
+        "id": "owner",
+        "name": "owner",
+        "hash": "sha256:replace-with-a-different-owner-token-hash"
+      }
+    ],
+    "statePath": "/var/lib/tgproxy-relay/state.json",
+    "geoIpUrl": "https://ipwho.is/%s?lang=ru&fields=success,country,city"
+  },
   "telegram": {
     "connectTimeoutMs": 7000,
     "idleTimeoutSec": 0,

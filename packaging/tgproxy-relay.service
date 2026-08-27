@@ -3,19 +3,22 @@ Description=TG Proxy VPS Relay
 Documentation=https://github.com/Dushnyj/TG-Proxy-Relay
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=tgproxy-relay
 Group=tgproxy-relay
 ExecStart=/opt/tgproxy-relay/tgproxy-relay -config /etc/tgproxy-relay/config.json
-Restart=on-failure
-RestartSec=5s
+Restart=always
+RestartSec=2s
+TimeoutStopSec=15s
+LimitNOFILE=65536
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/log/tgproxy-relay
+ReadWritePaths=/var/log/tgproxy-relay /var/lib/tgproxy-relay
 CapabilityBoundingSet=
 AmbientCapabilities=
 

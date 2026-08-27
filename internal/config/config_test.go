@@ -48,6 +48,30 @@ func TestLoadFileNormalizesConfigAndAuthorizesHashedTokens(t *testing.T) {
 	}
 }
 
+func TestLoadFileAllowsExplicitlyDisablingGeoIP(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	raw := `{
+  "tokens": [{"name": "phone", "hash": "` + config.TokenHash("phone-token") + `"}],
+  "admin": {
+    "tokens": [{"name": "owner", "hash": "` + config.TokenHash("owner-token") + `"}],
+    "statePath": "` + filepath.ToSlash(filepath.Join(dir, "state.json")) + `",
+    "geoIpUrl": ""
+  }
+}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile returned error: %v", err)
+	}
+	if cfg.Admin.GeoIPURL != "" {
+		t.Fatalf("explicitly disabled geoIpUrl was replaced with %q", cfg.Admin.GeoIPURL)
+	}
+}
+
 func TestDefaultIncludesWebSocketPathAndTestDCs(t *testing.T) {
 	cfg := config.Default()
 	if cfg.WebSocket.Path != "/apiws" {
@@ -61,11 +85,40 @@ func TestDefaultIncludesWebSocketPathAndTestDCs(t *testing.T) {
 func TestValidateRejectsUnsafeOrReservedWebSocketPath(t *testing.T) {
 	cfg := config.Default()
 	cfg.Tokens = []config.Token{{Name: "phone", Hash: config.TokenHash("secret")}}
-	for _, path := range []string{"relative", "/apiws?x=1", "/healthz", "/bad path"} {
+	for _, path := range []string{
+		"relative", "/", "/apiws/", "/nested//apiws", "/nested/../apiws",
+		"/apiws%2Fprivate", "/apiws?x=1", "/healthz", "/connect", "/admin",
+		"/admin/v1", "/apiws/connect", "/apiws/admin/v1/tokens", "/bad path",
+	} {
 		cfg.WebSocket.Path = path
 		if err := cfg.Validate(); err == nil {
 			t.Fatalf("unsafe websocket path %q accepted", path)
 		}
+	}
+	cfg.WebSocket.Path = "/private-relay/v1"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("canonical websocket path rejected: %v", err)
+	}
+}
+
+func TestValidateSeparatesClientAndOwnerCredentials(t *testing.T) {
+	cfg := config.Default()
+	cfg.Tokens = []config.Token{{Name: "phone", Hash: config.TokenHash("client")}}
+	cfg.Admin.Tokens = []config.Token{{Name: "owner", Hash: config.TokenHash("owner")}}
+	cfg.Admin.StatePath = filepath.Join(t.TempDir(), "state.json")
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid separated credentials rejected: %v", err)
+	}
+	if !cfg.AuthorizeBearer("Bearer client") || cfg.AuthorizeBearer("Bearer owner") {
+		t.Fatal("client authorization crossed roles")
+	}
+	if !cfg.AuthorizeAdminBearer("Bearer owner") || cfg.AuthorizeAdminBearer("Bearer client") {
+		t.Fatal("owner authorization crossed roles")
+	}
+
+	cfg.Admin.Tokens[0].Hash = config.TokenHash("client")
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("reused client/owner credential was accepted")
 	}
 }
 

@@ -7,10 +7,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -21,13 +23,22 @@ type Config struct {
 	Listen    string          `json:"listen"`
 	PublicURL string          `json:"publicUrl"`
 	Tokens    []Token         `json:"tokens"`
+	Admin     AdminConfig     `json:"admin"`
 	Telegram  TelegramConfig  `json:"telegram"`
 	WebSocket WebSocketConfig `json:"websocket"`
 }
 
 type Token struct {
-	Name string `json:"name"`
-	Hash string `json:"hash"`
+	ID        string `json:"id,omitempty"`
+	Name      string `json:"name"`
+	Hash      string `json:"hash"`
+	CreatedAt string `json:"createdAt,omitempty"`
+}
+
+type AdminConfig struct {
+	Tokens    []Token `json:"tokens,omitempty"`
+	StatePath string  `json:"statePath,omitempty"`
+	GeoIPURL  string  `json:"geoIpUrl,omitempty"`
 }
 
 type TelegramConfig struct {
@@ -40,6 +51,10 @@ type TelegramConfig struct {
 func Default() Config {
 	return Config{
 		Listen: "127.0.0.1:18080",
+		Admin: AdminConfig{
+			StatePath: "/var/lib/tgproxy-relay/state.json",
+			GeoIPURL:  "https://ipwho.is/%s?lang=ru&fields=success,country,city",
+		},
 		Telegram: TelegramConfig{
 			ConnectTimeoutMs: 7000,
 			IdleTimeoutSec:   0,
@@ -135,28 +150,28 @@ func (c *Config) Validate() error {
 	if len(c.Tokens) == 0 {
 		return errors.New("at least one token is required")
 	}
-	if len(c.Tokens) > 1024 {
-		return errors.New("too many tokens")
+	if err := validateTokens(c.Tokens, "token", 1024); err != nil {
+		return err
 	}
-	seenHashes := make(map[string]struct{}, len(c.Tokens))
+	if err := validateTokens(c.Admin.Tokens, "admin token", 64); err != nil {
+		return err
+	}
+	clientHashes := make(map[string]struct{}, len(c.Tokens))
 	for _, token := range c.Tokens {
-		if len(token.Name) > 128 || strings.IndexFunc(token.Name, func(r rune) bool {
-			return r < 0x20 || r == 0x7f
-		}) >= 0 {
-			return errors.New("token name is invalid")
+		clientHashes[normalizeHash(token.Hash)] = struct{}{}
+	}
+	for _, token := range c.Admin.Tokens {
+		if _, reused := clientHashes[normalizeHash(token.Hash)]; reused {
+			return errors.New("admin and client tokens must be different")
 		}
-		normalized := normalizeHash(token.Hash)
-		hexHash := strings.TrimPrefix(normalized, "sha256:")
-		if !strings.HasPrefix(normalized, "sha256:") || len(hexHash) != sha256.Size*2 {
-			return errors.New("token hash must be sha256:<64 hex chars>")
+	}
+	if len(c.Admin.Tokens) > 0 {
+		if !validStatePath(c.Admin.StatePath) {
+			return errors.New("admin statePath must be an absolute safe path")
 		}
-		if _, err := hex.DecodeString(hexHash); err != nil {
-			return errors.New("token hash must be sha256:<64 hex chars>")
+		if !validGeoIPURL(c.Admin.GeoIPURL) {
+			return errors.New("admin geoIpUrl must be empty or an https URL containing one %s placeholder")
 		}
-		if _, exists := seenHashes[normalized]; exists {
-			return errors.New("duplicate token hash")
-		}
-		seenHashes[normalized] = struct{}{}
 	}
 	if c.Telegram.ConnectTimeoutMs > 60_000 {
 		return errors.New("telegram connectTimeoutMs must not exceed 60000")
@@ -171,10 +186,13 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if !validWebSocketPath(c.WebSocket.Path) {
-		return errors.New("websocket path must be an absolute path without query or fragment")
+		return errors.New("websocket path must be a canonical absolute path without escapes, query, or fragment")
 	}
 	if c.WebSocket.Path == "/healthz" || c.WebSocket.Path == "/version" ||
-		c.WebSocket.Path == "/test-routes" {
+		c.WebSocket.Path == "/test-routes" || c.WebSocket.Path == "/connect" ||
+		c.WebSocket.Path == "/admin" || strings.HasPrefix(c.WebSocket.Path, "/admin/") ||
+		c.WebSocket.Path == "/apiws/connect" || c.WebSocket.Path == "/apiws/admin" ||
+		strings.HasPrefix(c.WebSocket.Path, "/apiws/admin/") {
 		return errors.New("websocket path conflicts with a management endpoint")
 	}
 	if c.WebSocket.PingIntervalSec <= 0 || c.WebSocket.PongTimeoutSec <= 0 {
@@ -203,12 +221,24 @@ func (c *Config) AuthorizeBearer(header string) bool {
 	return c.AuthorizeToken(strings.TrimSpace(strings.TrimPrefix(header, prefix)))
 }
 
+func (c *Config) AuthorizeAdminBearer(header string) bool {
+	const prefix = "Bearer "
+	if !strings.HasPrefix(header, prefix) {
+		return false
+	}
+	return authorizeToken(c.Admin.Tokens, strings.TrimSpace(strings.TrimPrefix(header, prefix)))
+}
+
 func (c *Config) AuthorizeToken(rawToken string) bool {
+	return authorizeToken(c.Tokens, rawToken)
+}
+
+func authorizeToken(tokens []Token, rawToken string) bool {
 	if strings.TrimSpace(rawToken) == "" {
 		return false
 	}
 	hash := TokenHash(rawToken)
-	for _, token := range c.Tokens {
+	for _, token := range tokens {
 		stored := normalizeHash(token.Hash)
 		if stored == "" {
 			continue
@@ -252,6 +282,9 @@ func (c *Config) applyDefaults() {
 	}
 	if len(c.Telegram.TestDCMap) == 0 {
 		c.Telegram.TestDCMap = Default().Telegram.TestDCMap
+	}
+	if strings.TrimSpace(c.Admin.StatePath) == "" {
+		c.Admin.StatePath = Default().Admin.StatePath
 	}
 	if strings.TrimSpace(c.WebSocket.Path) == "" {
 		c.WebSocket.Path = Default().WebSocket.Path
@@ -312,29 +345,25 @@ func validateDCMap(telegram TelegramConfig, routes map[int]string, test bool) er
 
 func validWebSocketPath(value string) bool {
 	path := strings.TrimSpace(value)
-	if path == "" || len(path) > 256 || path[0] != '/' || strings.ContainsAny(path, "?#") {
+	if path == "" || len(path) > 256 || path[0] != '/' || len(path) == 1 ||
+		strings.HasSuffix(path, "/") || strings.Contains(path, "//") ||
+		strings.ContainsAny(path, "%?#") {
 		return false
 	}
-	for index := 0; index < len(path); index++ {
-		ch := path[index]
-		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
-			(ch >= '0' && ch <= '9') || strings.ContainsRune("/._~-", rune(ch)) {
-			continue
+	for _, segment := range strings.Split(path[1:], "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
 		}
-		if ch == '%' && index+2 < len(path) && isHex(path[index+1]) && isHex(path[index+2]) {
-			index += 2
-			continue
-		}
-		if ch != '/' {
+		for index := 0; index < len(segment); index++ {
+			ch := segment[index]
+			if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+				(ch >= '0' && ch <= '9') || strings.ContainsRune("._~-", rune(ch)) {
+				continue
+			}
 			return false
 		}
 	}
 	return true
-}
-
-func isHex(value byte) bool {
-	return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f') ||
-		(value >= 'A' && value <= 'F')
 }
 
 func TokenHash(token string) string {
@@ -356,6 +385,102 @@ func normalizeHash(value string) string {
 		}
 	}
 	return normalized
+}
+
+func NormalizeTokenHash(value string) string {
+	return normalizeHash(value)
+}
+
+func StableTokenID(token Token) string {
+	if validIdentifier(token.ID) {
+		return strings.TrimSpace(token.ID)
+	}
+	hash := strings.TrimPrefix(normalizeHash(token.Hash), "sha256:")
+	if len(hash) >= 16 {
+		return "cfg_" + hash[:16]
+	}
+	return "cfg_unknown"
+}
+
+func validateTokens(tokens []Token, label string, max int) error {
+	if len(tokens) > max {
+		return fmt.Errorf("too many %s entries", label)
+	}
+	seenHashes := make(map[string]struct{}, len(tokens))
+	seenIDs := make(map[string]struct{}, len(tokens))
+	for _, token := range tokens {
+		if len(token.Name) > 128 || strings.IndexFunc(token.Name, func(r rune) bool {
+			return r < 0x20 || r == 0x7f
+		}) >= 0 {
+			return fmt.Errorf("%s name is invalid", label)
+		}
+		if token.ID != "" && !validIdentifier(token.ID) {
+			return fmt.Errorf("%s id is invalid", label)
+		}
+		if len(token.CreatedAt) > 64 || strings.IndexFunc(token.CreatedAt, func(r rune) bool {
+			return r < 0x20 || r == 0x7f
+		}) >= 0 {
+			return fmt.Errorf("%s createdAt is invalid", label)
+		}
+		normalized := normalizeHash(token.Hash)
+		hexHash := strings.TrimPrefix(normalized, "sha256:")
+		if !strings.HasPrefix(normalized, "sha256:") || len(hexHash) != sha256.Size*2 {
+			return fmt.Errorf("%s hash must be sha256:<64 hex chars>", label)
+		}
+		if _, err := hex.DecodeString(hexHash); err != nil {
+			return fmt.Errorf("%s hash must be sha256:<64 hex chars>", label)
+		}
+		if _, exists := seenHashes[normalized]; exists {
+			return fmt.Errorf("duplicate %s hash", label)
+		}
+		seenHashes[normalized] = struct{}{}
+		id := StableTokenID(token)
+		if _, exists := seenIDs[id]; exists {
+			return fmt.Errorf("duplicate %s id", label)
+		}
+		seenIDs[id] = struct{}{}
+	}
+	return nil
+}
+
+func validIdentifier(value string) bool {
+	id := strings.TrimSpace(value)
+	if id == "" || len(id) > 96 {
+		return false
+	}
+	for _, ch := range id {
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+			(ch >= '0' && ch <= '9') || ch == '-' || ch == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validStatePath(value string) bool {
+	path := strings.TrimSpace(value)
+	if path == "" || len(path) > 512 || !filepath.IsAbs(path) || strings.Contains(path, "\x00") {
+		return false
+	}
+	for _, part := range strings.FieldsFunc(path, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if part == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+func validGeoIPURL(value string) bool {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return true
+	}
+	if strings.Count(raw, "%s") != 1 || len(raw) > 1024 {
+		return false
+	}
+	parsed, err := url.Parse(strings.Replace(raw, "%s", "127.0.0.1", 1))
+	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil
 }
 
 func ParsePort(value string, fallback int) int {

@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
+
+	"github.com/Dushnyj/TG-Proxy-Relay/internal/config"
 )
 
 const websocketGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -30,7 +32,7 @@ const (
 	opPong         byte = 0xA
 )
 
-func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, token config.Token) {
 	if !isWebSocketUpgrade(r) {
 		http.Error(w, "websocket upgrade required", http.StatusBadRequest)
 		return
@@ -82,6 +84,16 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tuneTCPConnection(client)
+	unregister, registered := s.control.registerSession(token, r, func() {
+		_ = client.Close()
+		_ = telegram.Close()
+	})
+	if !registered {
+		_ = client.Close()
+		_ = telegram.Close()
+		return
+	}
+	defer unregister()
 	accept := websocketAccept(r.Header.Get("Sec-WebSocket-Key"))
 	_, _ = rw.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
 	_, _ = rw.WriteString("Upgrade: websocket\r\n")

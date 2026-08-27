@@ -29,8 +29,9 @@
 
 Не отправляйте:
 
-- raw Relay tokens;
+- raw client и owner Relay tokens;
 - token hashes из production-конфигов;
+- `/var/lib/tgproxy-relay/state.json` из production;
 - SSH-пароли и приватные ключи;
 - TLS private keys;
 - полные nginx, Caddy или Apache конфиги с приватными доменами;
