@@ -2,6 +2,41 @@
 
 Все заметные изменения TG Proxy VPS Relay фиксируются в этом файле.
 
+## [1.2.0] - 2026-08-27
+
+### Telegram topology и маршруты
+
+- DC теперь хранит до 32 IPv4/IPv6 endpoints с точным port и ролями regular/media/CDN;
+  legacy `dcMap` остаётся bootstrap/migration fallback.
+- Добавлены endpoint-level health, exponential cooldown, half-open probe и bounded race
+  альтернатив, поэтому мёртвый первый IP не задерживает весь media transfer.
+- Signed Ed25519 topology bundle поддерживает schema/generation/notBefore/expiry, replay и
+  downgrade protection, limits, atomic LKG persistence, jitter/backoff и on-demand refresh
+  неизвестного DC.
+- Public IP allow-list закрывает SSRF, localhost/private/link-local/CGNAT/reserved endpoints,
+  DNS rebinding source и client-supplied destination.
+- `/capabilities` согласует protocol/features/current DC/revision с Android; WebSocket
+  предпочитает `tgproxy-relay.v2`, сохраняя legacy `binary`.
+- `/test-routes` отдельно проверяет main/media server-side pools и честно маркирует результат
+  `TCP_ONLY`; реальный MTProto proof выполняет Android.
+
+### Надёжность и владелец
+
+- Глобальные/per-token/pending session limits ограничивают reconnect и resource storms.
+- Владелец может disconnect выбранного устройства и durable block/unblock без отзыва общего
+  client token; block закрывает активные сессии и запрещает reconnect.
+- Owner overview публикует block state/time, а миграция state v1 → v2 сохраняет существующие
+  токены, firstSeen/lastSeen и устройства.
+- Строгая WebSocket query validation отклоняет unknown/duplicate parameters.
+
+### Linux-совместимость автонастройки
+
+- Release workflow публикует Linux assets не только для amd64/arm64, но также для 386,
+  armv5/armv6/armv7, riscv64, ppc64/ppc64le, s390x, loong64 и MIPS-вариантов.
+- Android-установщик определяет package manager и init-систему удалённого Linux VPS, создаёт
+  службу для systemd/OpenRC/runit/SysV либо переносимый init-script и настраивает renewal через
+  systemd timer или cron.
+
 ## [1.1.0] - 2026-08-27
 
 ### Добавлено

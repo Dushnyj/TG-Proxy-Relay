@@ -33,8 +33,13 @@ const (
 )
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, token config.Token) {
-	if !isWebSocketUpgrade(r) {
+	subprotocol := selectedWebSocketSubprotocol(r)
+	if subprotocol == "" || !isWebSocketUpgrade(r) {
 		http.Error(w, "websocket upgrade required", http.StatusBadRequest)
+		return
+	}
+	if err := validateRouteQuery(r); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	dc, err := strconv.Atoi(r.URL.Query().Get("dc"))
@@ -56,16 +61,27 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, token c
 		http.Error(w, "test must be 0 or 1", http.StatusBadRequest)
 		return
 	}
-	address := s.cfg.Telegram.AddressForRoute(dc, testRoute)
-	if address == "" {
-		http.Error(w, "unknown dc", http.StatusBadRequest)
+	if s.control.deviceBlocked(token, r) {
+		http.Error(w, "device blocked", http.StatusForbidden)
 		return
 	}
-
+	mediaRoute := media == "1"
 	ctx, cancel := context.WithTimeout(r.Context(),
 		time.Duration(s.cfg.Telegram.ConnectTimeoutMs)*time.Millisecond)
 	defer cancel()
-	telegram, err := s.dialer.DialContext(ctx, "tcp", address)
+	if len(s.topology.ensureRoute(ctx, dc, testRoute, mediaRoute)) == 0 {
+		http.Error(w, "unknown dc", http.StatusBadRequest)
+		return
+	}
+	reservation, rejectedStatus := s.sessions.reserve(config.StableTokenID(token))
+	if reservation == nil {
+		http.Error(w, "relay is busy", rejectedStatus)
+		return
+	}
+	defer reservation.release()
+
+	telegram, _, err := s.dialTelegramRoute(ctx, dc, testRoute, mediaRoute)
+	reservation.upstreamDialDone()
 	if err != nil {
 		http.Error(w, "telegram dc unavailable", http.StatusBadGateway)
 		return
@@ -99,7 +115,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, token c
 	_, _ = rw.WriteString("Upgrade: websocket\r\n")
 	_, _ = rw.WriteString("Connection: Upgrade\r\n")
 	_, _ = rw.WriteString("Sec-WebSocket-Accept: " + accept + "\r\n")
-	_, _ = rw.WriteString("Sec-WebSocket-Protocol: binary\r\n")
+	_, _ = rw.WriteString("Sec-WebSocket-Protocol: " + subprotocol + "\r\n")
 	_, _ = rw.WriteString("\r\n")
 	if err := rw.Flush(); err != nil {
 		_ = client.Close()
@@ -491,7 +507,37 @@ func isWebSocketUpgrade(r *http.Request) bool {
 		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") &&
 		r.Header.Get("Sec-WebSocket-Key") != "" &&
 		r.Header.Get("Sec-WebSocket-Version") == "13" &&
-		headerContainsToken(r.Header.Get("Sec-WebSocket-Protocol"), "binary")
+		selectedWebSocketSubprotocol(r) != ""
+}
+
+func selectedWebSocketSubprotocol(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	value := r.Header.Get("Sec-WebSocket-Protocol")
+	if headerContainsToken(value, "tgproxy-relay.v2") {
+		return "tgproxy-relay.v2"
+	}
+	if headerContainsToken(value, "binary") {
+		return "binary"
+	}
+	return ""
+}
+
+func validateRouteQuery(r *http.Request) error {
+	if r == nil {
+		return errors.New("route query is required")
+	}
+	allowed := map[string]bool{"dc": true, "media": true, "test": true}
+	for key, values := range r.URL.Query() {
+		if !allowed[key] {
+			return fmt.Errorf("unknown route parameter %s", key)
+		}
+		if len(values) != 1 {
+			return fmt.Errorf("route parameter %s must appear once", key)
+		}
+	}
+	return nil
 }
 
 func headerContainsToken(value string, token string) bool {

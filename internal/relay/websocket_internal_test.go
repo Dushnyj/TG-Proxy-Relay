@@ -24,6 +24,33 @@ func TestWebSocketUpgradeRequiresBinarySubprotocol(t *testing.T) {
 	}
 }
 
+func TestWebSocketNegotiationPrefersV2AndKeepsLegacyBinary(t *testing.T) {
+	req := httptest.NewRequest("GET", "http://relay/apiws?dc=2&media=0", nil)
+	req.Header.Set("Sec-WebSocket-Protocol", "binary, tgproxy-relay.v2")
+	if got := selectedWebSocketSubprotocol(req); got != "tgproxy-relay.v2" {
+		t.Fatalf("selected subprotocol = %q", got)
+	}
+	req.Header.Set("Sec-WebSocket-Protocol", "binary")
+	if got := selectedWebSocketSubprotocol(req); got != "binary" {
+		t.Fatalf("legacy selected subprotocol = %q", got)
+	}
+}
+
+func TestRouteQueryRejectsUnknownAndDuplicateParameters(t *testing.T) {
+	valid := httptest.NewRequest("GET", "http://relay/apiws?dc=2&media=1&test=0", nil)
+	if err := validateRouteQuery(valid); err != nil {
+		t.Fatalf("valid route query rejected: %v", err)
+	}
+	unknown := httptest.NewRequest("GET", "http://relay/apiws?dc=2&media=1&dst=127.0.0.1", nil)
+	if err := validateRouteQuery(unknown); err == nil {
+		t.Fatal("unknown destination parameter was accepted")
+	}
+	duplicate := httptest.NewRequest("GET", "http://relay/apiws?dc=2&dc=3&media=1", nil)
+	if err := validateRouteQuery(duplicate); err == nil {
+		t.Fatal("duplicate dc parameter was accepted")
+	}
+}
+
 func TestClientFrameReaderReassemblesFragmentedBinaryWithInterleavedPing(t *testing.T) {
 	wire := append(maskedTestFrame(false, opBinary, []byte("hello ")),
 		maskedTestFrame(true, opPing, []byte("alive"))...)

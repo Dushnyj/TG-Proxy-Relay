@@ -9,6 +9,7 @@ path, например `/apiws`, при внутреннем bind `127.0.0.1:180
 /apiws                         -> /apiws                   WebSocket
 /apiws/healthz                 -> /healthz                 client auth
 /apiws/version                 -> /version                 client auth
+/apiws/capabilities            -> /capabilities            client auth
 /apiws/test-routes             -> /test-routes             client auth
 /apiws/admin/v1/*              -> /apiws/admin/v1/*        owner auth
 /apiws/connect                 -> /apiws/connect            public landing
@@ -49,6 +50,12 @@ location = /apiws/version {
     proxy_set_header Authorization $http_authorization;
 }
 
+location = /apiws/capabilities {
+    proxy_pass http://127.0.0.1:18080/capabilities;
+    proxy_set_header Host $host;
+    proxy_set_header Authorization $http_authorization;
+}
+
 location = /apiws/test-routes {
     proxy_pass http://127.0.0.1:18080/test-routes;
     proxy_set_header Host $host;
@@ -83,6 +90,11 @@ relay.example.com {
 
     handle /apiws/version {
         rewrite * /version
+        reverse_proxy 127.0.0.1:18080
+    }
+
+    handle /apiws/capabilities {
+        rewrite * /capabilities
         reverse_proxy 127.0.0.1:18080
     }
 
@@ -125,6 +137,8 @@ ProxyPass        "/apiws/healthz" "http://127.0.0.1:18080/healthz"
 ProxyPassReverse "/apiws/healthz" "http://127.0.0.1:18080/healthz"
 ProxyPass        "/apiws/version" "http://127.0.0.1:18080/version"
 ProxyPassReverse "/apiws/version" "http://127.0.0.1:18080/version"
+ProxyPass        "/apiws/capabilities" "http://127.0.0.1:18080/capabilities"
+ProxyPassReverse "/apiws/capabilities" "http://127.0.0.1:18080/capabilities"
 ProxyPass        "/apiws/test-routes" "http://127.0.0.1:18080/test-routes"
 ProxyPassReverse "/apiws/test-routes" "http://127.0.0.1:18080/test-routes"
 ProxyPass        "/apiws/admin/" "http://127.0.0.1:18080/apiws/admin/"
@@ -141,6 +155,8 @@ ProxyPassReverse "/apiws" "ws://127.0.0.1:18080/apiws"
 ```bash
 curl -fsS -H "Authorization: Bearer <client-token>" \
   https://relay.example.com/apiws/version
+curl -fsS -H "Authorization: Bearer <client-token>" \
+  https://relay.example.com/apiws/capabilities
 curl -fsS -H "Authorization: Bearer <owner-token>" \
   https://relay.example.com/apiws/admin/v1/overview
 curl -fsSI https://relay.example.com/apiws/connect
@@ -149,7 +165,8 @@ curl -fsSI https://relay.example.com/apiws/connect
 ## Правила безопасности
 
 - Не перезаписывайте существующий virtual host без backup.
-- Не выпускайте и не меняйте TLS certificates автоматически без явного подтверждения.
+- Автомастер Android выпускает/обновляет TLS certificate только после показа и подтверждения
+  плана; ручные скрипты не должны делать это молча.
 - Для сложных сайтов используйте отдельный subdomain.
 - Всегда валидируйте config до reload.
 - Если Relay стоит за reverse proxy, оставляйте bind на `127.0.0.1`.

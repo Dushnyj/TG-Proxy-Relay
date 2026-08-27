@@ -14,6 +14,7 @@ Relay принимает авторизованный WebSocket-трафик о�
 - [Токены](#токены)
 - [Управление владельца](#управление-владельца)
 - [Ссылки подключения](#ссылки-подключения)
+- [Telegram topology](#telegram-topology)
 - [Автонастройка из Android](#автонастройка-из-android)
 - [Документация](#документация)
 - [Сборка](#сборка)
@@ -30,12 +31,13 @@ Telegram Android
   -> TCP Telegram DC:443
 ```
 
-Публичный HTTPS-домен обычно проксирует один путь:
+Публичный HTTPS endpoint (домен, DuckDNS или IP certificate) обычно проксирует один путь:
 
 ```text
 WS   /apiws?dc=2&media=0&test=0
 GET  /apiws/healthz      -> /healthz
 GET  /apiws/version      -> /version
+GET  /apiws/capabilities -> /capabilities
 POST /apiws/test-routes  -> /test-routes
 ```
 
@@ -55,21 +57,28 @@ Owner API использует **отдельный** owner-token. Один raw-
 GitHub Actions публикует:
 
 ```text
-TG-Proxy-Relay-v<version>-linux-amd64.tar.gz
-TG-Proxy-Relay-v<version>-linux-arm64.tar.gz
+TG-Proxy-Relay-v<version>-linux-{amd64,386,arm64,armv7,armv6,armv5}.tar.gz
+TG-Proxy-Relay-v<version>-linux-{riscv64,ppc64,ppc64le,s390x,loong64}.tar.gz
+TG-Proxy-Relay-v<version>-linux-{mips,mipsle,mips64,mips64le}.tar.gz
 SHA256SUMS.txt
 ```
 
-Для большинства обычных VPS нужен `linux-amd64`. Для ARM VPS нужен `linux-arm64`.
+Для большинства обычных x86-64 VPS нужен `linux-amd64`; для 64-битного ARM — `linux-arm64`.
+Android-мастер сам сопоставляет `uname -m` с правильным asset, проверяет checksum и версию
+до замены бинарника.
 
 ## Установка
 
 Ручная установка описана в [docs/INSTALL.md](docs/INSTALL.md).
-Если используется TG Proxy Android, удобнее открыть **Настройки -> VPS Relay -> Автонастройка VPS**.
+Если используется TG Proxy Android, удобнее открыть **Настройки -> Relay -> Автонастройка VPS**.
 
 ## Reverse proxy
 
-Relay обычно слушает `127.0.0.1:18080`, а наружу публикуется через nginx, Caddy или Apache на HTTPS-домене.
+Relay обычно слушает `127.0.0.1:18080`, а наружу публикуется через nginx, Caddy или Apache по
+HTTPS. Android-мастер умеет полностью настроить чистый VPS по публичному IP, DuckDNS или уже
+имеющемуся домену, включая certificate и renewal timer/cron. Мастер не привязан к Ubuntu:
+поддерживаются systemd, OpenRC, runit и SysV, а пакеты устанавливаются через пакетный менеджер
+обнаруженного Linux-дистрибутива.
 Безопасные path-based примеры есть в [docs/REVERSE_PROXY.md](docs/REVERSE_PROXY.md).
 
 ## Токены
@@ -91,6 +100,8 @@ tgproxy-relay -token "long-random-token" -print-token-hash
 - немедленно отозвать токен и закрыть его активные сессии;
 - видеть привязанные устройства: марку, модель, версию приложения/Android,
   первое и последнее подключение, активные сессии, страну и город.
+- отключить только сессии выбранного устройства, заблокировать и разблокировать его без
+  отзыва общего token.
 
 Доступ выдаётся только отдельным owner-token из `admin.tokens`. Динамическое состояние
 хранится в `/var/lib/tgproxy-relay/state.json`; raw клиентские токены в этот файл не попадают.
@@ -112,6 +123,21 @@ Android создаёт HTTPS-ссылку вида
 на сервер и локально преобразуется страницей в `tgproxy://import?...`. Та же payload-модель
 используется для QR-кода, системного меню «Поделиться» и импорта из файла. SSH-данные и
 owner-token в клиентское подключение не входят.
+
+## Telegram topology
+
+Relay 1.2.0 принимает несколько IPv4/IPv6 endpoints и произвольный port на DC, разделяет
+regular/media/CDN pools, быстро гоняет альтернативы и ведёт endpoint-level cooldown. Новый
+signed topology manifest обновляется без APK и без ручного редактирования каждого клиента:
+
+```text
+signed current -> atomic LKG -> embedded owner bootstrap
+```
+
+Android и Relay согласуют protocol/features/current DC revision через `/capabilities`.
+Неизвестный DC не превращается в client-supplied destination: адрес выбирается только из
+server-side owner config или проверенного Ed25519 bundle. Настройка и signing CLI описаны в
+[docs/TOPOLOGY.md](docs/TOPOLOGY.md).
 
 ## Автонастройка из Android
 
@@ -135,6 +161,7 @@ TG Proxy Android умеет:
 - [Токены](docs/TOKENS.md)
 - [Обновления](docs/UPDATES.md)
 - [Автонастройка Android](docs/ANDROID_AUTO_SETUP.md)
+- [Telegram topology и signing](docs/TOPOLOGY.md)
 
 ## Сборка
 

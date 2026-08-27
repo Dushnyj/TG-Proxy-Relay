@@ -61,35 +61,77 @@ func (s *Server) handleOwnerTokens(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleOwnerToken(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	marker := "/admin/v1/tokens/"
 	markerAt := strings.LastIndex(r.URL.Path, marker)
 	if markerAt < 0 {
 		http.Error(w, "invalid token id", http.StatusBadRequest)
 		return
 	}
-	rawID := r.URL.Path[markerAt+len(marker):]
-	if rawID == "" || strings.Contains(rawID, "/") {
+	rawPath := strings.Trim(r.URL.Path[markerAt+len(marker):], "/")
+	parts := strings.Split(rawPath, "/")
+	if rawPath == "" || len(parts) == 0 {
 		http.Error(w, "invalid token id", http.StatusBadRequest)
 		return
 	}
-	id, err := url.PathUnescape(rawID)
+	id, err := url.PathUnescape(parts[0])
 	if err != nil || sanitizeIdentifier(id, 96) == "" {
 		http.Error(w, "invalid token id", http.StatusBadRequest)
 		return
 	}
-	if err := s.control.deleteToken(id); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			http.Error(w, "token not found", http.StatusNotFound)
+	if len(parts) == 1 {
+		if r.Method != http.MethodDelete {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		http.Error(w, "token could not be deleted", http.StatusInternalServerError)
+		if err := s.control.deleteToken(id); err != nil {
+			writeOwnerMutationError(w, err, "token could not be deleted")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if len(parts) != 4 || parts[1] != "devices" {
+		http.Error(w, "invalid device path", http.StatusBadRequest)
+		return
+	}
+	deviceID, err := url.PathUnescape(parts[2])
+	if err != nil || sanitizeIdentifier(deviceID, 96) == "" {
+		http.Error(w, "invalid device id", http.StatusBadRequest)
+		return
+	}
+	switch parts[3] {
+	case "disconnect":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		err = s.control.disconnectDevice(id, deviceID)
+	case "block":
+		if r.Method != http.MethodPut && r.Method != http.MethodDelete {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		err = s.control.setDeviceBlocked(id, deviceID, r.Method == http.MethodPut)
+	default:
+		http.Error(w, "invalid device action", http.StatusBadRequest)
+		return
+	}
+	if err != nil {
+		writeOwnerMutationError(w, err, "device action failed")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func writeOwnerMutationError(w http.ResponseWriter, err error, fallback string) {
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, fallback, http.StatusInternalServerError)
+		return
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

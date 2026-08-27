@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	controlStateVersion = 1
+	controlStateVersion = 2
 	maxControlBodyBytes = 32 * 1024
 	maxTrackedClients   = 4096
 	maxLocationCache    = 2048
@@ -51,10 +51,11 @@ type controlPlane struct {
 }
 
 type controlState struct {
-	Version       int                       `json:"version"`
-	AddedTokens   []config.Token            `json:"addedTokens,omitempty"`
-	RevokedHashes []string                  `json:"revokedHashes,omitempty"`
-	Clients       map[string]*trackedClient `json:"clients,omitempty"`
+	Version        int                       `json:"version"`
+	AddedTokens    []config.Token            `json:"addedTokens,omitempty"`
+	RevokedHashes  []string                  `json:"revokedHashes,omitempty"`
+	Clients        map[string]*trackedClient `json:"clients,omitempty"`
+	BlockedDevices map[string]string         `json:"blockedDevices,omitempty"`
 }
 
 type trackedClient struct {
@@ -119,6 +120,8 @@ type clientView struct {
 	FirstSeen      string `json:"firstSeen"`
 	LastSeen       string `json:"lastSeen"`
 	ActiveSessions int    `json:"activeSessions"`
+	Blocked        bool   `json:"blocked"`
+	BlockedAt      string `json:"blockedAt,omitempty"`
 }
 
 type overviewResponse struct {
@@ -140,8 +143,9 @@ func newControlPlane(cfg config.Config) (*controlPlane, error) {
 		locationCache: make(map[string]cachedLocation),
 		locationBusy:  make(map[string]struct{}),
 		state: controlState{
-			Version: controlStateVersion,
-			Clients: make(map[string]*trackedClient),
+			Version:        controlStateVersion,
+			Clients:        make(map[string]*trackedClient),
+			BlockedDevices: make(map[string]string),
 		},
 	}
 	if control.enabled() && control.statePath != "" {
@@ -303,6 +307,7 @@ func (c *controlPlane) deleteToken(id string) error {
 	previousAdded := cloneTokens(c.state.AddedTokens)
 	previousRevoked := append([]string(nil), c.state.RevokedHashes...)
 	removedClients := make(map[string]*trackedClient)
+	removedBlocked := make(map[string]string)
 	filtered := c.state.AddedTokens[:0]
 	for _, token := range c.state.AddedTokens {
 		if config.NormalizeTokenHash(token.Hash) != hash {
@@ -321,6 +326,10 @@ func (c *controlPlane) deleteToken(id string) error {
 	for key, client := range c.state.Clients {
 		if client != nil && client.TokenID == cleanID {
 			removedClients[key] = client
+			if blockedAt := c.state.BlockedDevices[key]; blockedAt != "" {
+				removedBlocked[key] = blockedAt
+				delete(c.state.BlockedDevices, key)
+			}
 			delete(c.state.Clients, key)
 		}
 	}
@@ -329,6 +338,9 @@ func (c *controlPlane) deleteToken(id string) error {
 		c.state.RevokedHashes = previousRevoked
 		for key, client := range removedClients {
 			c.state.Clients[key] = client
+		}
+		for key, blockedAt := range removedBlocked {
+			c.state.BlockedDevices[key] = blockedAt
 		}
 		c.mu.Unlock()
 		return err
@@ -346,18 +358,118 @@ func (c *controlPlane) deleteToken(id string) error {
 	return nil
 }
 
+func (c *controlPlane) deviceBlocked(token config.Token, r *http.Request) bool {
+	if c == nil || !c.enabled() {
+		return false
+	}
+	tokenID, deviceID := sessionIdentity(token, r)
+	key := tokenID + ":" + deviceID
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, blocked := c.state.BlockedDevices[key]
+	return blocked
+}
+
+func sessionIdentity(token config.Token, r *http.Request) (string, string) {
+	tokenID := config.StableTokenID(token)
+	deviceID := ""
+	remoteIP := ""
+	if r != nil {
+		deviceID = sanitizeIdentifier(r.Header.Get("X-TGProxy-Device-ID"), 96)
+		remoteIP = clientRemoteIP(r)
+	}
+	if deviceID == "" {
+		sum := sha256.Sum256([]byte(tokenID + "\n" + remoteIP))
+		deviceID = "legacy_" + hex.EncodeToString(sum[:8])
+	}
+	return tokenID, deviceID
+}
+
+func (c *controlPlane) disconnectDevice(tokenID, deviceID string) error {
+	key, err := deviceKey(tokenID, deviceID)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	if c.state.Clients[key] == nil {
+		c.mu.Unlock()
+		return os.ErrNotExist
+	}
+	closers := c.deviceClosersLocked(key)
+	c.mu.Unlock()
+	for _, closeSession := range closers {
+		closeSession()
+	}
+	return nil
+}
+
+func (c *controlPlane) setDeviceBlocked(tokenID, deviceID string, blocked bool) error {
+	key, err := deviceKey(tokenID, deviceID)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	// Validate and mutate under one lock. Otherwise a concurrent token deletion can remove
+	// the client between validation and persistence and leave an orphan blockedDevices entry
+	// that makes the durable state impossible to load after restart.
+	if c.state.Clients[key] == nil {
+		c.mu.Unlock()
+		return os.ErrNotExist
+	}
+	previous, existed := c.state.BlockedDevices[key]
+	if blocked {
+		c.state.BlockedDevices[key] = time.Now().UTC().Format(time.RFC3339)
+	} else {
+		delete(c.state.BlockedDevices, key)
+	}
+	if err := c.persistCriticalLocked(); err != nil {
+		if existed {
+			c.state.BlockedDevices[key] = previous
+		} else {
+			delete(c.state.BlockedDevices, key)
+		}
+		c.mu.Unlock()
+		return err
+	}
+	closers := []func(){}
+	if blocked {
+		closers = c.deviceClosersLocked(key)
+	}
+	c.mu.Unlock()
+	for _, closeSession := range closers {
+		closeSession()
+	}
+	return nil
+}
+
+func deviceKey(tokenID, deviceID string) (string, error) {
+	cleanToken := sanitizeIdentifier(tokenID, 96)
+	cleanDevice := sanitizeIdentifier(deviceID, 96)
+	if cleanToken == "" || cleanDevice == "" {
+		return "", errors.New("invalid device identity")
+	}
+	return cleanToken + ":" + cleanDevice, nil
+}
+
+func (c *controlPlane) deviceClosersLocked(clientKey string) []func() {
+	closers := make([]func(), 0)
+	for _, sessions := range c.active {
+		for _, session := range sessions {
+			if session != nil && session.clientKey == clientKey && session.close != nil {
+				closers = append(closers, session.close)
+			}
+		}
+	}
+	return closers
+}
+
 func (c *controlPlane) registerSession(token config.Token, r *http.Request,
 	closeSession func()) (func(), bool) {
 	if c == nil || !c.enabled() {
 		return func() {}, true
 	}
-	deviceID := sanitizeIdentifier(r.Header.Get("X-TGProxy-Device-ID"), 96)
+	tokenID, deviceID := sessionIdentity(token, r)
 	remoteIP := clientRemoteIP(r)
-	if deviceID == "" {
-		sum := sha256.Sum256([]byte(config.StableTokenID(token) + "\n" + remoteIP))
-		deviceID = "legacy_" + hex.EncodeToString(sum[:8])
-	}
-	tokenID := config.StableTokenID(token)
 	clientKey := tokenID + ":" + deviceID
 	now := time.Now().UTC().Format(time.RFC3339)
 
@@ -366,6 +478,10 @@ func (c *controlPlane) registerSession(token config.Token, r *http.Request,
 	// holding the same lock used by token deletion so a connection cannot slip in after its
 	// token was revoked but before the session entered the active-session map.
 	if c.shuttingDown || !c.clientTokenActiveLocked(token) {
+		c.mu.Unlock()
+		return func() {}, false
+	}
+	if _, blocked := c.state.BlockedDevices[clientKey]; blocked {
 		c.mu.Unlock()
 		return func() {}, false
 	}
@@ -520,6 +636,8 @@ func (c *controlPlane) overview() overviewResponse {
 			Android: client.Android, Country: client.Country, City: client.City,
 			RemoteIP: client.RemoteIP, FirstSeen: client.FirstSeen, LastSeen: client.LastSeen,
 			ActiveSessions: activeByClient[client.Key],
+			Blocked:        c.state.BlockedDevices[client.Key] != "",
+			BlockedAt:      c.state.BlockedDevices[client.Key],
 		})
 	}
 	sort.Slice(clients, func(i, j int) bool { return clients[i].LastSeen > clients[j].LastSeen })
@@ -618,13 +736,20 @@ func (c *controlPlane) load() error {
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return errors.New("parse control state: trailing data")
 	}
-	if state.Version != controlStateVersion {
+	if state.Version != 1 && state.Version != controlStateVersion {
 		return fmt.Errorf("unsupported control state version %d", state.Version)
+	}
+	if state.Version == 1 {
+		state.Version = controlStateVersion
 	}
 	if state.Clients == nil {
 		state.Clients = make(map[string]*trackedClient)
 	}
-	if len(state.AddedTokens) > 1024 || len(state.RevokedHashes) > 2048 || len(state.Clients) > maxTrackedClients {
+	if state.BlockedDevices == nil {
+		state.BlockedDevices = make(map[string]string)
+	}
+	if len(state.AddedTokens) > 1024 || len(state.RevokedHashes) > 2048 ||
+		len(state.Clients) > maxTrackedClients || len(state.BlockedDevices) > maxTrackedClients {
 		return errors.New("control state exceeds limits")
 	}
 	for _, token := range state.AddedTokens {
@@ -643,6 +768,15 @@ func (c *controlPlane) load() error {
 		if client == nil || key != client.Key || sanitizeIdentifier(client.DeviceID, 96) == "" ||
 			sanitizeIdentifier(client.TokenID, 96) == "" || key != client.TokenID+":"+client.DeviceID {
 			return errors.New("control state contains an invalid client")
+		}
+	}
+	for key, blockedAt := range state.BlockedDevices {
+		client := state.Clients[key]
+		if client == nil || key != client.TokenID+":"+client.DeviceID {
+			return errors.New("control state contains an invalid blocked device")
+		}
+		if _, err := time.Parse(time.RFC3339, blockedAt); err != nil {
+			return errors.New("control state contains an invalid blocked timestamp")
 		}
 	}
 	c.state = state
@@ -866,7 +1000,9 @@ func (c *controlPlane) pruneClientsLocked() {
 	items := append(inactive, active...)
 	remove := len(c.state.Clients) - maxTrackedClients + 1
 	for index := 0; index < remove && index < len(items); index++ {
-		delete(c.state.Clients, items[index].key)
+		key := items[index].key
+		delete(c.state.Clients, key)
+		delete(c.state.BlockedDevices, key)
 	}
 }
 

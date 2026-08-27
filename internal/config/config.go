@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,7 +18,12 @@ import (
 	"strings"
 )
 
-const maxConfigBytes = 1 << 20
+const (
+	maxConfigBytes       = 1 << 20
+	maxTelegramDCs       = 32
+	maxEndpointsPerDC    = 32
+	maxTelegramEndpoints = maxTelegramDCs * maxEndpointsPerDC
+)
 
 type Config struct {
 	Listen    string          `json:"listen"`
@@ -42,10 +48,31 @@ type AdminConfig struct {
 }
 
 type TelegramConfig struct {
-	ConnectTimeoutMs int            `json:"connectTimeoutMs"`
-	IdleTimeoutSec   int            `json:"idleTimeoutSec"`
-	DCMap            map[int]string `json:"dcMap"`
-	TestDCMap        map[int]string `json:"testDcMap"`
+	ConnectTimeoutMs int                        `json:"connectTimeoutMs"`
+	IdleTimeoutSec   int                        `json:"idleTimeoutSec"`
+	DCMap            map[int]string             `json:"dcMap"`
+	TestDCMap        map[int]string             `json:"testDcMap"`
+	DCOptions        map[int][]TelegramEndpoint `json:"dcOptions,omitempty"`
+	TestDCOptions    map[int][]TelegramEndpoint `json:"testDcOptions,omitempty"`
+	Topology         TopologyConfig             `json:"topology,omitempty"`
+}
+
+type TopologyConfig struct {
+	URL                string `json:"url,omitempty"`
+	PublicKey          string `json:"publicKey,omitempty"`
+	StatePath          string `json:"statePath,omitempty"`
+	RefreshIntervalSec int    `json:"refreshIntervalSec,omitempty"`
+}
+
+// TelegramEndpoint is one owner-controlled, allow-listed Telegram client access point.
+// Multiple entries for the same DC preserve ports, address families and media/CDN roles.
+type TelegramEndpoint struct {
+	Address      string `json:"address"`
+	Role         string `json:"role,omitempty"` // regular, media or cdn
+	Static       bool   `json:"static,omitempty"`
+	ThisPortOnly bool   `json:"thisPortOnly,omitempty"`
+	TCPOOnly     bool   `json:"tcpoOnly,omitempty"`
+	Secret       string `json:"secret,omitempty"`
 }
 
 func Default() Config {
@@ -104,6 +131,10 @@ func LoadFile(path string) (Config, error) {
 		return Config{}, errors.New("config must not exceed 1048576 bytes")
 	}
 	cfg := Default()
+	// encoding/json merges object members into an already non-nil map. Without clearing a
+	// map that is explicitly present in the file, an owner-supplied partial dcMap silently
+	// inherited unrelated embedded routes and advertised capabilities it did not configure.
+	resetExplicitTelegramMaps(data, &cfg)
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&cfg); err != nil {
@@ -116,6 +147,32 @@ func LoadFile(path string) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func resetExplicitTelegramMaps(data []byte, cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	var root map[string]json.RawMessage
+	if json.Unmarshal(data, &root) != nil {
+		return
+	}
+	var telegram map[string]json.RawMessage
+	if raw, ok := root["telegram"]; !ok || json.Unmarshal(raw, &telegram) != nil {
+		return
+	}
+	if _, ok := telegram["dcMap"]; ok {
+		cfg.Telegram.DCMap = nil
+	}
+	if _, ok := telegram["testDcMap"]; ok {
+		cfg.Telegram.TestDCMap = nil
+	}
+	if _, ok := telegram["dcOptions"]; ok {
+		cfg.Telegram.DCOptions = nil
+	}
+	if _, ok := telegram["testDcOptions"]; ok {
+		cfg.Telegram.TestDCOptions = nil
+	}
 }
 
 func (c *Config) Validate() error {
@@ -185,11 +242,23 @@ func (c *Config) Validate() error {
 	if err := validateDCMap(c.Telegram, c.Telegram.TestDCMap, true); err != nil {
 		return err
 	}
+	if err := ValidateTelegramDCOptions(c.Telegram.DCOptions); err != nil {
+		return err
+	}
+	if err := ValidateTelegramDCOptions(c.Telegram.TestDCOptions); err != nil {
+		return err
+	}
+	if len(c.Telegram.DCMap) == 0 && len(c.Telegram.DCOptions) == 0 {
+		return errors.New("telegram requires at least one production bootstrap route")
+	}
+	if err := validateTopology(c.Telegram.Topology); err != nil {
+		return err
+	}
 	if !validWebSocketPath(c.WebSocket.Path) {
 		return errors.New("websocket path must be a canonical absolute path without escapes, query, or fragment")
 	}
 	if c.WebSocket.Path == "/healthz" || c.WebSocket.Path == "/version" ||
-		c.WebSocket.Path == "/test-routes" || c.WebSocket.Path == "/connect" ||
+		c.WebSocket.Path == "/capabilities" || c.WebSocket.Path == "/test-routes" || c.WebSocket.Path == "/connect" ||
 		c.WebSocket.Path == "/admin" || strings.HasPrefix(c.WebSocket.Path, "/admin/") ||
 		c.WebSocket.Path == "/apiws/connect" || c.WebSocket.Path == "/apiws/admin" ||
 		strings.HasPrefix(c.WebSocket.Path, "/apiws/admin/") {
@@ -255,16 +324,7 @@ func (t TelegramConfig) AddressForDC(dc int) string {
 	if t.DCMap != nil {
 		host = strings.TrimSpace(t.DCMap[dc])
 	}
-	if host == "" {
-		host = strings.TrimSpace(Default().Telegram.DCMap[dc])
-	}
-	if host == "" {
-		return ""
-	}
-	if _, _, err := net.SplitHostPort(host); err == nil {
-		return host
-	}
-	return net.JoinHostPort(host, "443")
+	return normalizeTelegramAddress(host)
 }
 
 func (c *Config) applyDefaults() {
@@ -277,11 +337,22 @@ func (c *Config) applyDefaults() {
 	if c.Telegram.IdleTimeoutSec < 0 {
 		c.Telegram.IdleTimeoutSec = 0
 	}
-	if len(c.Telegram.DCMap) == 0 {
+	// A non-nil empty map is an explicit owner decision. Restoring embedded routes here
+	// would reintroduce destinations the owner deliberately removed (for example when
+	// migrating completely to dcOptions). Omitted/null maps remain nil after decoding.
+	if c.Telegram.DCMap == nil {
 		c.Telegram.DCMap = Default().Telegram.DCMap
 	}
-	if len(c.Telegram.TestDCMap) == 0 {
+	if c.Telegram.TestDCMap == nil {
 		c.Telegram.TestDCMap = Default().Telegram.TestDCMap
+	}
+	if strings.TrimSpace(c.Telegram.Topology.URL) != "" {
+		if strings.TrimSpace(c.Telegram.Topology.StatePath) == "" {
+			c.Telegram.Topology.StatePath = "/var/lib/tgproxy-relay/topology.json"
+		}
+		if c.Telegram.Topology.RefreshIntervalSec <= 0 {
+			c.Telegram.Topology.RefreshIntervalSec = 900
+		}
 	}
 	if strings.TrimSpace(c.Admin.StatePath) == "" {
 		c.Admin.StatePath = Default().Admin.StatePath
@@ -304,43 +375,211 @@ func (c *Config) applyDefaults() {
 }
 
 func (t TelegramConfig) AddressForRoute(dc int, test bool) string {
-	if !test {
-		return t.AddressForDC(dc)
-	}
-	host := ""
-	if t.TestDCMap != nil {
-		host = strings.TrimSpace(t.TestDCMap[dc])
-	}
-	if host == "" {
-		host = strings.TrimSpace(Default().Telegram.TestDCMap[dc])
-	}
-	if host == "" {
+	addresses := t.AddressesForRoute(dc, test, false)
+	if len(addresses) == 0 {
 		return ""
 	}
-	if _, _, err := net.SplitHostPort(host); err == nil {
-		return host
-	}
-	return net.JoinHostPort(host, "443")
+	return addresses[0]
 }
 
-func validateDCMap(telegram TelegramConfig, routes map[int]string, test bool) error {
-	if len(routes) > 256 {
+func (t TelegramConfig) AddressesForRoute(dc int, test bool, media bool) []string {
+	options := t.DCOptions[dc]
+	legacy := t.DCMap[dc]
+	if test {
+		options = t.TestDCOptions[dc]
+		legacy = t.TestDCMap[dc]
+	}
+	result := make([]string, 0, len(options)+1)
+	appendRole := func(role string) {
+		for _, endpoint := range options {
+			endpointRole := strings.ToLower(strings.TrimSpace(endpoint.Role))
+			if endpointRole == "" {
+				endpointRole = "regular"
+			}
+			if endpointRole != role {
+				continue
+			}
+			address := normalizeTelegramAddress(endpoint.Address)
+			if address != "" && !containsStringValue(result, address) {
+				result = append(result, address)
+			}
+		}
+	}
+	if media {
+		appendRole("media")
+		appendRole("cdn")
+		appendRole("regular")
+	} else {
+		appendRole("regular")
+		appendRole("cdn")
+	}
+	if len(result) == 0 {
+		if address := normalizeTelegramAddress(legacy); address != "" {
+			result = append(result, address)
+		}
+	}
+	return result
+}
+
+func validateDCMap(_ TelegramConfig, routes map[int]string, _ bool) error {
+	if len(routes) > maxTelegramDCs {
 		return errors.New("telegram dc map contains too many routes")
 	}
 	for dc, host := range routes {
 		if dc <= 0 || dc > 32767 || strings.TrimSpace(host) == "" {
 			return errors.New("telegram dc map contains an invalid route")
 		}
-		address := telegram.AddressForDC(dc)
-		if test {
-			address = telegram.AddressForRoute(dc, true)
-		}
-		addressHost, _, err := net.SplitHostPort(address)
-		if err != nil || !validHost(addressHost) {
+		address := normalizeTelegramAddress(host)
+		if err := validateTelegramAddress(address); err != nil {
 			return errors.New("telegram dc map contains an invalid address")
 		}
 	}
 	return nil
+}
+
+func ValidateTelegramDCOptions(routes map[int][]TelegramEndpoint) error {
+	if len(routes) > maxTelegramDCs {
+		return errors.New("telegram dc options contain too many routes")
+	}
+	total := 0
+	for dc, endpoints := range routes {
+		if dc <= 0 || dc > 32767 || len(endpoints) == 0 ||
+			len(endpoints) > maxEndpointsPerDC {
+			return errors.New("telegram dc options contain an invalid route")
+		}
+		total += len(endpoints)
+		seen := make(map[string]struct{}, len(endpoints))
+		for _, endpoint := range endpoints {
+			role := strings.ToLower(strings.TrimSpace(endpoint.Role))
+			if role != "" && role != "regular" && role != "media" && role != "cdn" {
+				return errors.New("telegram dc endpoint contains an invalid role")
+			}
+			if endpoint.Secret != "" {
+				return errors.New("telegram dc endpoint secrets are not supported by raw relay")
+			}
+			if role == "" {
+				role = "regular"
+			}
+			address := normalizeTelegramAddress(endpoint.Address)
+			if err := validateTelegramAddress(address); err != nil {
+				return errors.New("telegram dc endpoint contains an invalid address")
+			}
+			key := role + "|" + address
+			if _, duplicate := seen[key]; duplicate {
+				return errors.New("telegram dc endpoint is duplicated")
+			}
+			seen[key] = struct{}{}
+		}
+	}
+	if total > maxTelegramEndpoints {
+		return errors.New("telegram dc options contain too many endpoints")
+	}
+	return nil
+}
+
+func validateTopology(topology TopologyConfig) error {
+	rawURL := strings.TrimSpace(topology.URL)
+	if rawURL == "" {
+		if strings.TrimSpace(topology.PublicKey) != "" ||
+			strings.TrimSpace(topology.StatePath) != "" || topology.RefreshIntervalSec != 0 {
+			return errors.New("telegram topology url is required when topology settings are present")
+		}
+		return nil
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil ||
+		parsed.Fragment != "" || !validHost(parsed.Hostname()) {
+		return errors.New("telegram topology url must be an absolute https URL")
+	}
+	key, err := base64.RawStdEncoding.DecodeString(strings.TrimSpace(topology.PublicKey))
+	if err != nil {
+		key, err = base64.StdEncoding.DecodeString(strings.TrimSpace(topology.PublicKey))
+	}
+	if err != nil || len(key) != 32 {
+		return errors.New("telegram topology publicKey must be a base64 Ed25519 public key")
+	}
+	if !validStatePath(topology.StatePath) {
+		return errors.New("telegram topology statePath must be an absolute safe path")
+	}
+	if topology.RefreshIntervalSec < 300 || topology.RefreshIntervalSec > 86_400 {
+		return errors.New("telegram topology refreshIntervalSec must be between 300 and 86400")
+	}
+	return nil
+}
+
+func normalizeTelegramAddress(value string) string {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return ""
+	}
+	if ip := net.ParseIP(strings.Trim(raw, "[]")); ip != nil {
+		return net.JoinHostPort(ip.String(), "443")
+	}
+	if host, port, err := net.SplitHostPort(raw); err == nil {
+		if host == "" || port == "" {
+			return ""
+		}
+		return net.JoinHostPort(strings.Trim(host, "[]"), port)
+	}
+	if strings.Contains(raw, ":") {
+		return ""
+	}
+	return net.JoinHostPort(raw, "443")
+}
+
+func validateTelegramAddress(address string) error {
+	host, rawPort, err := net.SplitHostPort(strings.TrimSpace(address))
+	if err != nil {
+		return errors.New("invalid host")
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if !IsSafeTelegramIP(ip) {
+		return errors.New("Telegram endpoint must be a public IP literal")
+	}
+	port, err := strconv.Atoi(rawPort)
+	if err != nil || port <= 0 || port > 65535 {
+		return errors.New("invalid port")
+	}
+	return nil
+}
+
+// IsSafeTelegramIP is the common SSRF boundary for owner config, signed manifests and
+// topology-source DNS. Telegram dc_options carry IP literals, so accepting hostnames here
+// would add DNS-rebinding risk without adding a Telegram capability.
+func IsSafeTelegramIP(ip net.IP) bool {
+	if ip == nil || !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() ||
+		ip.IsUnspecified() {
+		return false
+	}
+	if v4 := ip.To4(); v4 != nil {
+		for _, cidr := range []string{
+			"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "192.0.2.0/24",
+			"198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "240.0.0.0/4",
+		} {
+			_, block, _ := net.ParseCIDR(cidr)
+			if block.Contains(v4) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, cidr := range []string{"100::/64", "2001:db8::/32"} {
+		_, block, _ := net.ParseCIDR(cidr)
+		if block.Contains(ip) {
+			return false
+		}
+	}
+	return true
+}
+
+func containsStringValue(items []string, wanted string) bool {
+	for _, item := range items {
+		if item == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func validWebSocketPath(value string) bool {

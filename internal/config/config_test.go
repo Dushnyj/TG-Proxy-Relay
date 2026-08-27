@@ -1,8 +1,12 @@
 package config_test
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Dushnyj/TG-Proxy-Relay/internal/config"
@@ -40,11 +44,127 @@ func TestLoadFileNormalizesConfigAndAuthorizesHashedTokens(t *testing.T) {
 	if got := cfg.Telegram.AddressForDC(2); got != "149.154.167.220:443" {
 		t.Fatalf("dc address mismatch: %q", got)
 	}
+	if len(cfg.Telegram.DCMap) != 1 {
+		t.Fatalf("explicit dcMap was merged with embedded defaults: %v", cfg.Telegram.DCMap)
+	}
 	if !cfg.AuthorizeBearer("Bearer phone-token") {
 		t.Fatal("expected bearer token to be authorized")
 	}
 	if cfg.AuthorizeBearer("Bearer wrong-token") {
 		t.Fatal("wrong token was authorized")
+	}
+}
+
+func TestLoadFilePreservesExplicitEmptyLegacyMapForOptionsOnlyTopology(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	raw := `{
+  "listen": "127.0.0.1:18080",
+  "tokens": [{"name": "phone", "hash": "` + config.TokenHash("phone-token") + `"}],
+  "telegram": {
+    "dcMap": {},
+    "dcOptions": {"204": [{"address": "8.8.8.8:8443", "role": "regular"}]}
+  }
+}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := config.LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Telegram.DCMap) != 0 {
+		t.Fatalf("explicit empty dcMap restored embedded defaults: %v", cfg.Telegram.DCMap)
+	}
+	if got := cfg.Telegram.AddressesForRoute(204, false, false); len(got) != 1 || got[0] != "8.8.8.8:8443" {
+		t.Fatalf("options-only route was not preserved: %v", got)
+	}
+}
+
+func TestValidateRejectsConfigurationWithoutProductionBootstrap(t *testing.T) {
+	cfg := config.Default()
+	cfg.Tokens = []config.Token{{Name: "phone", Hash: config.TokenHash("token")}}
+	cfg.Telegram.DCMap = map[int]string{}
+	cfg.Telegram.DCOptions = map[int][]config.TelegramEndpoint{}
+
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "production bootstrap") {
+		t.Fatalf("expected missing bootstrap error, got %v", err)
+	}
+}
+
+func TestTelegramEndpointOptionsPreserveRolesFamiliesAndPorts(t *testing.T) {
+	cfg := config.Default()
+	cfg.Tokens = []config.Token{{Name: "phone", Hash: config.TokenHash("token")}}
+	cfg.Telegram.DCOptions = map[int][]config.TelegramEndpoint{
+		204: {
+			{Address: "8.8.8.8:8443", Role: "regular", ThisPortOnly: true},
+			{Address: "[2606:4700:4700::1111]:9443", Role: "media", Static: true},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	main := cfg.Telegram.AddressesForRoute(204, false, false)
+	media := cfg.Telegram.AddressesForRoute(204, false, true)
+	if len(main) != 1 || main[0] != "8.8.8.8:8443" {
+		t.Fatalf("unexpected main endpoints: %v", main)
+	}
+	if len(media) != 2 || media[0] != "[2606:4700:4700::1111]:9443" {
+		t.Fatalf("unexpected media endpoints: %v", media)
+	}
+
+	cfg.Telegram.DCOptions[204][0].Address = "8.8.8.8:not-a-port"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("non-numeric Telegram endpoint port was accepted")
+	}
+}
+
+func TestTelegramEndpointOptionsRejectDuplicateRoleAndAddress(t *testing.T) {
+	cfg := config.Default()
+	cfg.Tokens = []config.Token{{Name: "phone", Hash: config.TokenHash("token")}}
+	cfg.Telegram.DCOptions = map[int][]config.TelegramEndpoint{
+		2: {
+			{Address: "149.154.167.51:443", Role: "regular"},
+			{Address: "149.154.167.51", Role: ""},
+		},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("duplicate Telegram endpoint was accepted")
+	}
+}
+
+func TestTelegramEndpointsRejectHostnamesAndSpecialNetworks(t *testing.T) {
+	for _, address := range []string{"localhost:443", "127.0.0.1:443", "10.0.0.1:443",
+		"169.254.169.254:80", "203.0.113.10:443", "[::1]:443", "[fe80::1]:443",
+		"[2001:db8::1]:443"} {
+		cfg := config.Default()
+		cfg.Tokens = []config.Token{{Name: "phone", Hash: config.TokenHash("token")}}
+		cfg.Telegram.DCOptions = map[int][]config.TelegramEndpoint{
+			204: {{Address: address, Role: "regular"}},
+		}
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("unsafe Telegram endpoint %q was accepted", address)
+		}
+	}
+}
+
+func TestTopologyConfigurationRequiresHTTPSKeyStateAndBoundedRefresh(t *testing.T) {
+	publicKey, _, _ := ed25519.GenerateKey(rand.Reader)
+	cfg := config.Default()
+	cfg.Tokens = []config.Token{{Name: "phone", Hash: config.TokenHash("token")}}
+	cfg.Telegram.Topology = config.TopologyConfig{
+		URL:                "https://updates.example/topology.json",
+		PublicKey:          base64.RawStdEncoding.EncodeToString(publicKey),
+		StatePath:          filepath.Join(t.TempDir(), "topology.json"),
+		RefreshIntervalSec: 900,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Telegram.Topology.URL = "http://updates.example/topology.json"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("cleartext topology URL was accepted")
 	}
 }
 

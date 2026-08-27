@@ -14,16 +14,17 @@ Owner endpoints требуют отдельный `Authorization: Bearer <owner-
 ```text
 GET <websocket.path>?dc=<dc>&media=<0|1>&test=<0|1>
 Upgrade: websocket
-Sec-WebSocket-Protocol: binary
+Sec-WebSocket-Protocol: tgproxy-relay.v2, binary
 ```
 
-Relay открывает TCP-соединение к выбранному Telegram DC и прокидывает binary WebSocket
-messages в TCP socket. `test=0` выбирает `telegram.dcMap`, `test=1` —
-`telegram.testDcMap`. Для test DC допустимы 1–3. Параметр `test` необязателен для
-обратной совместимости, по умолчанию равен `0` и при наличии принимает только `0` или `1`.
+Relay выбирает один из server-side endpoints DC и прокидывает binary WebSocket messages в
+TCP socket. `test=0` выбирает production topology, `test=1` — test topology. Параметр
+`test` необязателен для обратной совместимости. Неизвестные и дублирующиеся query-параметры
+отклоняются; передать `dst`/IP из клиента нельзя. Сервер предпочитает subprotocol
+`tgproxy-relay.v2`, но принимает старый `binary`.
 
 `websocket.path` по умолчанию равен `/apiws`. Если настроен другой path, сервер также
-принимает `/apiws` как compatibility alias. Пути `/healthz`, `/version`, `/test-routes`,
+принимает `/apiws` как compatibility alias. Пути `/healthz`, `/version`, `/capabilities`, `/test-routes`,
 `/connect` и `/admin/*` зарезервированы.
 
 Android передаёт идентификатор устройства, производителя, модель, версии приложения и
@@ -49,7 +50,7 @@ GET /version
 ```json
 {
   "name": "tgproxy-relay",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "protocol": 1,
   "minAppProtocol": 1,
   "ownerProtocol": 1
@@ -57,6 +58,16 @@ GET /version
 ```
 
 Prefixed public endpoint: `GET /apiws/version`.
+
+## Capabilities
+
+```text
+GET /capabilities
+```
+
+Ответ содержит диапазон совместимых protocol, subprotocols, реально поддержанные features,
+уровень диагностики и current topology revision/DC set. Пример и конфигурация signed
+topology: [TOPOLOGY.md](TOPOLOGY.md).
 
 ## Route Test
 
@@ -70,12 +81,12 @@ Content-Type: application/json
 ```json
 {
   "dcs": [
-    { "dc": 1, "ip": "149.154.175.50" },
-    { "dc": 2, "ip": "149.154.167.51" },
-    { "dc": 3, "ip": "149.154.175.100" },
-    { "dc": 4, "ip": "149.154.167.91" },
-    { "dc": 5, "ip": "149.154.171.5" },
-    { "dc": 203, "ip": "91.105.192.100" }
+    { "dc": 1 },
+    { "dc": 2 },
+    { "dc": 3 },
+    { "dc": 4 },
+    { "dc": 5 },
+    { "dc": 203 }
   ]
 }
 ```
@@ -83,16 +94,17 @@ Content-Type: application/json
 Ответ plain text:
 
 ```text
-DC1 main OK
-DC1 media OK
+DC1 main OK TCP_ONLY
+DC1 media OK TCP_ONLY
 ...
-DC203 main OK
-DC203 media OK
+DC203 main OK TCP_ONLY
+DC203 media OK TCP_ONLY
 ```
 
 Prefixed public endpoint: `POST /apiws/test-routes`.
 
-`/test-routes` выполняет coarse TCP-проверку production DC из серверной карты. Android
+Поле legacy `ip`, если его прислал старый Android, игнорируется. `/test-routes` выполняет
+coarse TCP-проверку main и media endpoint pools из server-side topology. Android
 дополнительно выполняет настоящий MTProto `req_pq/resPQ` для production main/media scopes;
 это разные уровни проверки.
 
@@ -123,21 +135,23 @@ Authorization: Bearer <owner-token>
       "deviceId": "device_...",
       "manufacturer": "Xiaomi",
       "model": "Redmi Note 8 Pro",
-      "appVersion": "1.1.0",
-      "appCode": "10100",
+      "appVersion": "1.2.0",
+      "appCode": "10200",
       "android": "11",
       "country": "Россия",
       "city": "Москва",
       "remoteIp": "203.0.113.10",
       "firstSeen": "2026-08-27T12:00:00Z",
       "lastSeen": "2026-08-27T12:05:00Z",
-      "activeSessions": 1
+      "activeSessions": 1,
+      "blocked": false
     }
   ]
 }
 ```
 
 `country` и `city` отсутствуют, если GeoIP отключён, адрес непубличный или lookup не удался.
+Заблокированное устройство дополнительно получает `blockedAt`.
 
 ## Создать клиентский токен
 
@@ -175,6 +189,19 @@ Authorization: Bearer <owner-token>
 
 Успех: `204 No Content`. Отзыв сначала атомарно сохраняется в state, затем Relay закрывает
 все активные сессии токена. Prefixed вариант: `/apiws/admin/v1/tokens/<token-id>`.
+
+## Управление устройством
+
+```text
+POST   /admin/v1/tokens/<token-id>/devices/<device-id>/disconnect
+PUT    /admin/v1/tokens/<token-id>/devices/<device-id>/block
+DELETE /admin/v1/tokens/<token-id>/devices/<device-id>/block
+Authorization: Bearer <owner-token>
+```
+
+`disconnect` закрывает только текущие сессии устройства. `block` сначала атомарно сохраняет
+запрет, затем закрывает его сессии; повторное подключение получает `403`. `unblock` не
+отзывает token и разрешает устройству подключиться снова.
 
 ## Landing page подключения
 

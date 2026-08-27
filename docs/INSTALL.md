@@ -2,12 +2,16 @@
 
 ## Требования
 
-- Linux VPS с `systemd`.
+- Linux VPS. Для автонастройки из Android поддерживаются `systemd`, OpenRC, runit, SysV init
+  и переносимый init-script fallback.
 - Публичный IPv4 или IPv6.
-- HTTPS-домен для production-режима через reverse proxy.
+- Публичный IP; по желанию бесплатное имя DuckDNS или уже имеющийся домен.
 - Root или sudo-доступ.
 
-Relay может работать IP-only без HTTPS для тестов, но для постоянного использования рекомендуется HTTPS-домен.
+TG Proxy Android публикует Relay только через HTTPS: по домену либо по публичному IP с
+короткоживущим Let's Encrypt IP-сертификатом. Мастер приложения сам устанавливает reverse
+proxy, выпускает certificate и включает renewal timer. Незащищённый standalone HTTP остаётся
+только ручным диагностическим режимом.
 
 ## Скачать релиз
 
@@ -16,18 +20,20 @@ Relay может работать IP-only без HTTPS для тестов, но
 ```bash
 mkdir -p /opt/tgproxy-relay
 cd /opt/tgproxy-relay
-asset=TG-Proxy-Relay-v1.1.0-linux-amd64.tar.gz
+asset=TG-Proxy-Relay-v1.2.0-linux-amd64.tar.gz
 curl -fL -o "$asset" \
-  "https://github.com/Dushnyj/TG-Proxy-Relay/releases/download/v1.1.0/$asset"
+  "https://github.com/Dushnyj/TG-Proxy-Relay/releases/download/v1.2.0/$asset"
 curl -L -o SHA256SUMS.txt \
-  https://github.com/Dushnyj/TG-Proxy-Relay/releases/download/v1.1.0/SHA256SUMS.txt
+  https://github.com/Dushnyj/TG-Proxy-Relay/releases/download/v1.2.0/SHA256SUMS.txt
 grep " $asset$" SHA256SUMS.txt | sha256sum -c -
 tar -xzf "$asset"
 chmod +x tgproxy-relay
 ./tgproxy-relay -version
 ```
 
-Для ARM VPS используйте `linux-arm64`.
+Доступные суффиксы архитектур: `amd64`, `386`, `arm64`, `armv7`, `armv6`, `armv5`, `riscv64`,
+`ppc64`, `ppc64le`, `s390x`, `loong64`, `mips`, `mipsle`, `mips64`, `mips64le`.
+Автонастройка Android выбирает суффикс автоматически по `uname -m`.
 
 ## Создать client и owner hashes
 
@@ -102,11 +108,14 @@ nano /etc/tgproxy-relay/config.json
 ```
 
 `websocket.path` должен быть абсолютным путём без query/fragment и совпадать с
-Android/reverse proxy. Пути `/healthz`, `/version`, `/test-routes`, `/connect` и `/admin/*`
+Android/reverse proxy. Пути `/healthz`, `/version`, `/capabilities`, `/test-routes`, `/connect` и `/admin/*`
 зарезервированы. `geoIpUrl` можно явно задать пустой строкой, чтобы не отправлять публичные
 IP внешнему GeoIP-сервису. После изменения всегда запускайте `-check-config` до restart.
 
-## Systemd
+## Systemd (пример ручной установки)
+
+Ниже показан только ручной systemd-вариант. Android-мастер генерирует соответствующую службу
+сам: OpenRC service, runit service directory, SysV init script или переносимый init script.
 
 ```bash
 useradd --system --home /nonexistent --shell /usr/sbin/nologin tgproxy-relay || true
@@ -128,6 +137,9 @@ journalctl -u tgproxy-relay -f
 ```bash
 curl -H "Authorization: Bearer replace-with-raw-token" \
   https://relay.example.com/apiws/healthz
+
+curl -H "Authorization: Bearer replace-with-raw-token" \
+  https://relay.example.com/apiws/capabilities
 ```
 
 Ожидаемый ответ:

@@ -1,10 +1,11 @@
 # Токены и права владельца
 
-Relay `1.1.0` разделяет две роли:
+Начиная с Relay `1.1.0`, сервер разделяет две роли; Relay `1.2.0` дополнительно поддерживает
+disconnect/block/unblock отдельного устройства:
 
-- **client token** — WebSocket-трафик, `/healthz`, `/version`, `/test-routes`;
+- **client token** — WebSocket-трафик, `/healthz`, `/version`, `/capabilities`, `/test-routes`;
 - **owner token** — только `/admin/v1/*`: список, создание и отзыв client tokens,
-  просмотр привязанных устройств.
+  просмотр, disconnect, block и unblock привязанных устройств.
 
 Одинаковый raw-секрет или hash в обеих ролях запрещён конфиг-валидатором.
 

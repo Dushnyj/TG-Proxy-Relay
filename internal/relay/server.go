@@ -19,6 +19,7 @@ import (
 const (
 	Name              = "tgproxy-relay"
 	Protocol          = 1
+	MaxRelayProtocol  = 2
 	MinAppProtocol    = 1
 	OwnerAPIProtocol  = 1
 	maxTestRoutesBody = 64 * 1024
@@ -26,16 +27,19 @@ const (
 	maxTestRoutesTime = 15 * time.Second
 )
 
-var Version = "1.1.0"
+var Version = "1.2.0"
 
 type Dialer interface {
 	DialContext(ctx context.Context, network string, address string) (net.Conn, error)
 }
 
 type Server struct {
-	cfg     config.Config
-	dialer  Dialer
-	control *controlPlane
+	cfg       config.Config
+	dialer    Dialer
+	control   *controlPlane
+	upstreams *upstreamPool
+	sessions  *sessionLimiter
+	topology  *topologyManager
 }
 
 type Option func(*Server)
@@ -53,7 +57,9 @@ func NewServer(cfg config.Config, opts ...Option) (*Server, error) {
 		return nil, err
 	}
 	server := &Server{
-		cfg: cfg,
+		cfg:       cfg,
+		upstreams: newUpstreamPool(),
+		sessions:  newSessionLimiter(),
 		dialer: &net.Dialer{
 			Timeout: time.Duration(cfg.Telegram.ConnectTimeoutMs) * time.Millisecond,
 		},
@@ -61,6 +67,11 @@ func NewServer(cfg config.Config, opts ...Option) (*Server, error) {
 	for _, opt := range opts {
 		opt(server)
 	}
+	topology, err := newTopologyManager(cfg.Telegram)
+	if err != nil {
+		return nil, fmt.Errorf("initialize Telegram topology: %w", err)
+	}
+	server.topology = topology
 	control, err := newControlPlane(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("initialize owner control plane: %w", err)
@@ -73,6 +84,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.withClientAuth(s.ignoreClientToken(s.handleHealthz)))
 	mux.HandleFunc("/version", s.withClientAuth(s.ignoreClientToken(s.handleVersion)))
+	mux.HandleFunc("/capabilities", s.withClientAuth(s.ignoreClientToken(s.handleCapabilities)))
 	mux.HandleFunc("/test-routes", s.withClientAuth(s.ignoreClientToken(s.handleTestRoutes)))
 	mux.HandleFunc(s.cfg.WebSocket.Path, s.withClientAuth(s.handleWebSocket))
 	s.registerOwnerRoutes(mux, "")
@@ -97,6 +109,7 @@ func (s *Server) ListenAndServeContext(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	s.topology.start(ctx)
 	httpServer := &http.Server{
 		Addr:              s.cfg.Listen,
 		Handler:           s.Handler(),
@@ -185,6 +198,44 @@ func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	type protocolRange struct {
+		Min int `json:"min"`
+		Max int `json:"max"`
+	}
+	type topologyView struct {
+		Source        string `json:"source"`
+		Dynamic       bool   `json:"dynamic"`
+		Revision      uint64 `json:"revision"`
+		ProductionDCs []int  `json:"productionDcs"`
+		TestDCs       []int  `json:"testDcs"`
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Name             string        `json:"name"`
+		Version          string        `json:"version"`
+		Protocol         protocolRange `json:"protocol"`
+		WebSocket        []string      `json:"websocketSubprotocols"`
+		Features         []string      `json:"features"`
+		RouteDiagnostics string        `json:"routeDiagnostics"`
+		Topology         topologyView  `json:"topology"`
+	}{
+		Name: Name, Version: Version,
+		Protocol:  protocolRange{Min: MinAppProtocol, Max: MaxRelayProtocol},
+		WebSocket: []string{"tgproxy-relay.v2", "binary"},
+		Features: []string{"endpoint-fallback", "media-endpoints", "ipv4-ipv6",
+			"signed-topology-lkg", "owner-tokens", "owner-devices", "device-blocking"},
+		RouteDiagnostics: "tcp-preflight-only-client-must-prove-mtproto",
+		Topology: topologyView{Source: s.topology.source(), Dynamic: s.topology.dynamic(),
+			Revision:      s.topology.revision(),
+			ProductionDCs: s.topology.configuredDCs(false),
+			TestDCs:       s.topology.configuredDCs(true)},
+	})
+}
+
 func (s *Server) handleTestRoutes(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -222,7 +273,7 @@ func (s *Server) handleTestRoutes(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) checkRoutes(ctx context.Context, req testRoutesRequest) (string, bool) {
 	dcs := sortedDCS(req.DCS)
-	errorsByIndex := make([]error, len(dcs))
+	errorsByIndex := make([]routeCheckErrors, len(dcs))
 	completedByIndex := make([]bool, len(dcs))
 	jobs := make(chan int)
 	workerCount := len(dcs)
@@ -242,8 +293,10 @@ func (s *Server) checkRoutes(ctx context.Context, req testRoutesRequest) (string
 					if !ok {
 						return
 					}
-					errorsByIndex[index] = s.checkAddress(
-						ctx, s.cfg.Telegram.AddressForDC(dcs[index].DC))
+					errorsByIndex[index].main = s.checkRouteAddress(
+						ctx, dcs[index].DC, false)
+					errorsByIndex[index].media = s.checkRouteAddress(
+						ctx, dcs[index].DC, true)
 					completedByIndex[index] = true
 				}
 			}
@@ -254,7 +307,7 @@ func (s *Server) checkRoutes(ctx context.Context, req testRoutesRequest) (string
 		case jobs <- index:
 		case <-ctx.Done():
 			for pending := index; pending < len(dcs); pending++ {
-				errorsByIndex[pending] = ctx.Err()
+				errorsByIndex[pending] = routeCheckErrors{main: ctx.Err(), media: ctx.Err()}
 				completedByIndex[pending] = true
 			}
 			close(jobs)
@@ -267,28 +320,52 @@ func (s *Server) checkRoutes(ctx context.Context, req testRoutesRequest) (string
 	if ctx.Err() != nil {
 		for index := range errorsByIndex {
 			if !completedByIndex[index] {
-				errorsByIndex[index] = ctx.Err()
+				errorsByIndex[index] = routeCheckErrors{main: ctx.Err(), media: ctx.Err()}
 			}
 		}
 	}
 	return formatRouteReport(dcs, errorsByIndex)
 }
 
-func formatRouteReport(dcs []testDC, errorsByIndex []error) (string, bool) {
+type routeCheckErrors struct{ main, media error }
+
+func formatRouteReport(dcs []testDC, errorsByIndex []routeCheckErrors) (string, bool) {
 	var out strings.Builder
 	allAvailable := true
 	for index, dc := range dcs {
-		err := errorsByIndex[index]
-		for _, scope := range []string{"main", "media"} {
+		for _, check := range []struct {
+			scope string
+			err   error
+		}{
+			{scope: "main", err: errorsByIndex[index].main},
+			{scope: "media", err: errorsByIndex[index].media},
+		} {
+			err := check.err
 			if err != nil {
 				allAvailable = false
-				fmt.Fprintf(&out, "DC%d %s ERROR %s\n", dc.DC, scope, err.Error())
+				fmt.Fprintf(&out, "DC%d %s ERROR %s (TCP_ONLY)\n", dc.DC, check.scope, err.Error())
 			} else {
-				fmt.Fprintf(&out, "DC%d %s OK\n", dc.DC, scope)
+				fmt.Fprintf(&out, "DC%d %s OK TCP_ONLY\n", dc.DC, check.scope)
 			}
 		}
 	}
 	return out.String(), allAvailable
+}
+
+func (s *Server) checkRouteAddress(parent context.Context, dc int, media bool) error {
+	addresses := s.topology.addresses(dc, false, media)
+	if len(addresses) == 0 {
+		return fmt.Errorf("unknown dc")
+	}
+	var last error
+	for _, address := range addresses {
+		if err := s.checkAddress(parent, address); err == nil {
+			return nil
+		} else {
+			last = err
+		}
+	}
+	return last
 }
 
 func (s *Server) checkAddress(parent context.Context, address string) error {

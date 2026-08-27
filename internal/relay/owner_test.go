@@ -216,6 +216,135 @@ func TestOwnerOverviewTracksDeviceMetadataAndTrustsOnlyLocalProxyForwarding(t *t
 	}
 }
 
+func TestOwnerCanDisconnectBlockAndUnblockOneDevice(t *testing.T) {
+	telegramRelay, telegramPeer := net.Pipe()
+	defer telegramPeer.Close()
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	server := newOwnerServer(t, statePath, singleUseDialer{conn: telegramRelay})
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+
+	conn := dialWebSocketHeaders(t, ts.URL, "/apiws?dc=2&media=0", "client-token",
+		map[string]string{"X-TGProxy-Device-ID": "device_42"})
+	defer conn.Close()
+	endpoint := ts.URL + "/admin/v1/tokens/primary/devices/device_42/block"
+	if status := ownerMutationStatus(t, http.MethodPut, endpoint); status != http.StatusNoContent {
+		t.Fatalf("block status = %d", status)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := conn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("blocking a device did not close its active session")
+	}
+	if status := webSocketUpgradeStatus(t, ts.URL, "/apiws?dc=2&media=0",
+		"client-token", "device_42"); status != http.StatusForbidden {
+		t.Fatalf("blocked reconnect status = %d", status)
+	}
+	if status := ownerMutationStatus(t, http.MethodDelete, endpoint); status != http.StatusNoContent {
+		t.Fatalf("unblock status = %d", status)
+	}
+
+	request, _ := http.NewRequest(http.MethodGet, ts.URL+"/admin/v1/overview", nil)
+	request.Header.Set("Authorization", "Bearer owner-token")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var overview struct {
+		Clients []struct {
+			DeviceID string `json:"deviceId"`
+			Blocked  bool   `json:"blocked"`
+		} `json:"clients"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&overview); err != nil {
+		t.Fatal(err)
+	}
+	if len(overview.Clients) != 1 || overview.Clients[0].DeviceID != "device_42" || overview.Clients[0].Blocked {
+		t.Fatalf("unexpected device state: %+v", overview.Clients)
+	}
+}
+
+func TestOwnerCanDisconnectOneDeviceWithoutRevokingToken(t *testing.T) {
+	telegramRelay, telegramPeer := net.Pipe()
+	defer telegramPeer.Close()
+	server := newOwnerServer(t, filepath.Join(t.TempDir(), "state.json"),
+		singleUseDialer{conn: telegramRelay})
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+
+	conn := dialWebSocketHeaders(t, ts.URL, "/apiws?dc=2&media=0", "client-token",
+		map[string]string{"X-TGProxy-Device-ID": "device_42"})
+	defer conn.Close()
+	endpoint := ts.URL + "/admin/v1/tokens/primary/devices/device_42/disconnect"
+	if status := ownerMutationStatus(t, http.MethodPost, endpoint); status != http.StatusNoContent {
+		t.Fatalf("disconnect status = %d", status)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := conn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("disconnect did not close the selected device session")
+	}
+
+	request, _ := http.NewRequest(http.MethodGet, ts.URL+"/admin/v1/overview", nil)
+	request.Header.Set("Authorization", "Bearer owner-token")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var overview struct {
+		Tokens []struct {
+			ID string `json:"id"`
+		} `json:"tokens"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&overview); err != nil {
+		t.Fatal(err)
+	}
+	if len(overview.Tokens) != 1 || overview.Tokens[0].ID != "primary" {
+		t.Fatalf("disconnect unexpectedly revoked token: %+v", overview.Tokens)
+	}
+}
+
+func ownerMutationStatus(t *testing.T, method, endpoint string) int {
+	t.Helper()
+	request, _ := http.NewRequest(method, endpoint, nil)
+	request.Header.Set("Authorization", "Bearer owner-token")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	return response.StatusCode
+}
+
+func webSocketUpgradeStatus(t *testing.T, rawURL, path, token, deviceID string) int {
+	t.Helper()
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.DialTimeout("tcp", parsed.Host, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	request := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\n"+
+		"Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGVzdC10ZXN0LXRlc3Q=\r\n"+
+		"Sec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: tgproxy-relay.v2, binary\r\n"+
+		"X-TGProxy-Device-ID: %s\r\n\r\n", path, parsed.Host, token, deviceID)
+	if _, err := conn.Write([]byte(request)); err != nil {
+		t.Fatal(err)
+	}
+	statusLine, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	var status int
+	if _, err := fmt.Sscanf(statusLine, "HTTP/1.1 %d", &status); err != nil {
+		t.Fatal(err)
+	}
+	return status
+}
+
 func TestOwnerStateRejectsTokenIDCollisionAfterConfigChange(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	server := newOwnerServer(t, statePath, &fakeDialer{})

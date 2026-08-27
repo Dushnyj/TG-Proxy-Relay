@@ -9,11 +9,14 @@ curl -H "Authorization: Bearer <token>" \
   https://relay.example.com/apiws/version
 ```
 
-## Ручное обновление
+## Ручное обновление (пример для systemd)
+
+Автоматическое обновление из Android использует обнаруженную init-систему и не требует
+systemd. Команды ниже оставлены как ручной пример для systemd-сервера.
 
 ```bash
 set -euo pipefail
-version=1.1.0
+version=1.2.0
 asset="TG-Proxy-Relay-v${version}-linux-amd64.tar.gz"
 base="https://github.com/Dushnyj/TG-Proxy-Relay/releases/download/v${version}"
 
@@ -72,7 +75,7 @@ systemctl restart tgproxy-relay
 ```
 
 Reverse proxy должен пропускать `/apiws/admin/v1/*` и `/apiws/connect`, см.
-[REVERSE_PROXY.md](REVERSE_PROXY.md). Client token по-прежнему используется для version/health;
+[REVERSE_PROXY.md](REVERSE_PROXY.md). Client token по-прежнему используется для version/health/capabilities;
 owner token — только для Owner API.
 
 ## Подсказка в Android
