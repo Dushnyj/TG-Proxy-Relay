@@ -9,35 +9,42 @@
 | latest | Да |
 | older | Только критические исправления по возможности |
 
-## Как сообщить об уязвимости
+## Закрытое сообщение
 
-Не публикуйте рабочие эксплойты, raw-токены, SSH-данные, приватные ключи и полные production-конфиги в публичных issues.
+Используйте
+[Private vulnerability reporting](https://github.com/Dushnyj/TG-Proxy-Relay/security/advisories/new).
+Не создавайте публичный issue с proof, позволяющим атаковать production Relay.
 
-Сообщение должно содержать:
+Укажите:
 
-- версию TG Proxy VPS Relay;
-- Linux-дистрибутив и архитектуру;
-- reverse proxy, если проблема связана с ним;
-- краткое описание;
-- шаги воспроизведения;
+- версию Relay и asset architecture;
+- Linux/init и reverse proxy;
+- затронутый endpoint/компонент;
+- минимальные шаги воспроизведения;
 - ожидаемое и фактическое поведение;
-- логи без секретов.
+- влияние на auth, isolation, topology, availability или data;
+- обезличенные логи без secrets.
 
-Если проблема связана с GitHub Releases, укажите имя asset и SHA256 из `SHA256SUMS.txt`.
+## Никогда не отправляйте публично
 
-## Секреты
+- raw client/owner tokens или production hashes;
+- полный production `config.json`/`state.json`;
+- SSH password/private key;
+- TLS private key;
+- Ed25519 topology signing private key;
+- реальные private domains/IP и device IP;
+- GitHub credentials;
+- user diagnostic archive без проверки.
 
-Не отправляйте:
+## Основные security boundaries
 
-- raw client и owner Relay tokens;
-- token hashes из production-конфигов;
-- `/var/lib/tgproxy-relay/state.json` из production;
-- SSH-пароли и приватные ключи;
-- TLS private keys;
-- полные nginx, Caddy или Apache конфиги с приватными доменами;
-- GitHub tokens.
+- client и owner roles разделены;
+- raw tokens не хранятся сервером;
+- destination принадлежит server topology, а не запросу клиента;
+- private/reserved endpoints и replay/downgrade topology отклоняются;
+- state и topology LKG записываются атомарно;
+- revoke/block закрывает активные sessions;
+- reverse proxy должен сохранять auth и ограничивать public routes заявленным prefix.
 
-## Область проекта
-
-TG Proxy VPS Relay принимает авторизованный WebSocket-трафик от TG Proxy Android и прокидывает его к Telegram DC TCP endpoints.
-Проблемы Telegram-клиентов, Android-прошивок, хостинг-провайдеров и сторонних reverse proxy относятся к проекту только если они воспроизводимо влияют на Relay.
+В scope входят Relay binary, config/state migration, owner API, WebSocket/TCP bridge, topology,
+release artifacts и поставляемые reverse-proxy/service contracts.

@@ -1,0 +1,19 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Literal placeholders in manual curl examples"
+targetRules = ["curl-auth-header"]
+regexTarget = "line"
+regexes = [
+  '''Authorization: Bearer replace-with-raw-token''',
+  '''Authorization: Bearer replace-with-owner-token'''
+]
+
+[[allowlists]]
+description = "RFC 6455 sample key in a WebSocket integration test"
+targetRules = ["generic-api-key"]
+regexTarget = "line"
+regexes = [
+  '''Sec-WebSocket-Key: dGVzdC10ZXN0LXRlc3Q='''
+]

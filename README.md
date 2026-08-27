@@ -1,182 +1,150 @@
 # TG Proxy VPS Relay
 
-**TG Proxy VPS Relay** - серверная часть для [TG Proxy Android](https://github.com/Dushnyj/TG-Proxy).
-Relay принимает авторизованный WebSocket-трафик от Android-приложения и открывает TCP-соединения к Telegram DC.
+<p align="center">
+  <strong>Авторизованный WebSocket/TLS-маршрут от TG Proxy Android к Telegram DC</strong><br>
+  Linux · regular/media topology · owner tokens · автоматическая настройка из приложения
+</p>
 
-![TG Proxy VPS Relay overview](docs/assets/tg-proxy-relay-hero-v2.png)
+<p align="center">
+  <a href="https://github.com/Dushnyj/TG-Proxy-Relay/releases"><img alt="release" src="https://img.shields.io/badge/release-1.2.0-3390EC?style=for-the-badge"></a>
+  <img alt="Go 1.22" src="https://img.shields.io/badge/Go-1.22%2B-00ADD8?style=for-the-badge&logo=go&logoColor=white">
+  <a href="https://github.com/Dushnyj/TG-Proxy-Relay/actions/workflows/ci.yml"><img alt="Relay CI" src="https://img.shields.io/github/actions/workflow/status/Dushnyj/TG-Proxy-Relay/ci.yml?branch=main&style=for-the-badge&label=CI"></a>
+  <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-111827?style=for-the-badge"></a>
+</p>
 
-## Навигация
+![Схема TG Proxy VPS Relay](docs/assets/tg-proxy-relay-hero-v2.png)
 
-- [Как это работает](#как-это-работает)
-- [Релизные файлы](#релизные-файлы)
-- [Установка](#установка)
-- [Reverse proxy](#reverse-proxy)
-- [Токены](#токены)
-- [Управление владельца](#управление-владельца)
-- [Ссылки подключения](#ссылки-подключения)
-- [Telegram topology](#telegram-topology)
-- [Автонастройка из Android](#автонастройка-из-android)
-- [Документация](#документация)
-- [Сборка](#сборка)
-- [Безопасность](#безопасность)
+Relay — серверная часть [TG Proxy Android](https://github.com/Dushnyj/TG-Proxy). Она принимает
+только авторизованный WebSocket, выбирает endpoint из server-owned Telegram topology и открывает
+TCP-соединение к нужному production/test DC. Client не может передать произвольный destination.
 
-## Как это работает
+## Для пользователя Android
+
+Ручная работа с Linux не требуется:
+
+1. Подготовьте VPS по [коротким требованиям](docs/VPS_REQUIREMENTS.md).
+2. В TG Proxy откройте **Настройки → Relay → Автонастройка VPS**.
+3. Введите SSH IP/host, port, login и password, выданные хостингом.
+4. Подтвердите SSH fingerprint.
+5. Выберите публичный IP, бесплатный DuckDNS или свой домен/поддомен.
+6. Проверьте read-only план и нажмите установку.
+
+Android сам определяет Linux/architecture/package manager/init, скачивает правильный asset,
+создаёт backup, устанавливает service и HTTPS, проверяет regular/media маршруты и сохраняет
+owner-доступ локально. Домен покупать не нужно.
+
+- [Требования к VPS](docs/VPS_REQUIREMENTS.md)
+- [Что делает Android-мастер](docs/ANDROID_AUTO_SETUP.md)
+- [Пошаговая Android-инструкция](https://github.com/Dushnyj/TG-Proxy/blob/main/docs/VPS_RELAY.md)
+- [Бесплатный DuckDNS](https://github.com/Dushnyj/TG-Proxy/blob/main/docs/DUCKDNS.md)
+- [Ссылка, QR и импорт](https://github.com/Dushnyj/TG-Proxy/blob/main/docs/SHARING_AND_IMPORT.md)
+
+## Архитектура
 
 ```text
 Telegram Android
-  -> MTProto Proxy (127.0.0.1:1443)
-  -> TG Proxy Android route engine
-  -> WebSocket/TLS
-  -> tgproxy-relay
-  -> TCP Telegram DC:443
+  -> TG Proxy local MTProto 127.0.0.1:1443
+  -> wss://relay.example.com/apiws?dc=2&media=0&test=0
+  -> reverse proxy
+  -> tgproxy-relay 127.0.0.1:18080
+  -> bounded race of server-owned Telegram endpoints
+  -> TCP Telegram DC
 ```
 
-Публичный HTTPS endpoint (домен, DuckDNS или IP certificate) обычно проксирует один путь:
+Публичный prefix обычно предоставляет:
 
 ```text
-WS   /apiws?dc=2&media=0&test=0
-GET  /apiws/healthz      -> /healthz
-GET  /apiws/version      -> /version
-GET  /apiws/capabilities -> /capabilities
-POST /apiws/test-routes  -> /test-routes
+WS   /apiws?dc=<dc>&media=<0|1>&test=<0|1>
+GET  /apiws/healthz
+GET  /apiws/version
+GET  /apiws/capabilities
+POST /apiws/test-routes
+GET  /apiws/connect
+...  /apiws/admin/v1/*
 ```
 
-Клиентские WebSocket и служебные endpoints требуют заголовок:
+Client endpoints используют `Authorization: Bearer <client-token>`. Owner API принимает только
+отдельный owner-token; один raw secret нельзя использовать в обеих ролях.
 
-```text
-Authorization: Bearer <token>
-```
+## Надёжность Telegram и media
 
-Owner API использует **отдельный** owner-token. Один raw-секрет нельзя одновременно
-использовать как клиентский и owner-token.
+- несколько IPv4/IPv6 endpoints на DC;
+- отдельные regular/media/CDN pools и произвольные ports;
+- endpoint health, exponential cooldown, half-open probe и bounded race;
+- WebSocket ping/pong, limits и корректные close codes;
+- server-side `/test-routes` с честной маркировкой `TCP_ONLY`;
+- настоящий MTProto proof выполняет Android;
+- Ed25519 signed topology, replay/downgrade/expiry checks и atomic last-known-good;
+- strict query validation и запрет client-supplied destination.
 
-Основной WebSocket path задаётся в `websocket.path`. `/apiws` используется по умолчанию и остаётся compatibility alias при переходе на custom path.
+## Токены и owner control plane
+
+В конфигурации/state хранятся SHA-256 hashes, не raw tokens. Владелец через Android может:
+
+- видеть client tokens и подключённые устройства;
+- создать отдельный token и получить secret один раз;
+- отозвать token и немедленно закрыть его sessions;
+- отключить sessions одного устройства;
+- заблокировать/разблокировать installation ID;
+- увидеть модель, версии, first/last seen и приблизительные страну/город.
+
+`admin.geoIpUrl` можно оставить пустым, чтобы не обращаться к внешнему GeoIP provider.
+
+Подробнее: [TOKENS.md](docs/TOKENS.md) и [API.md](docs/API.md).
 
 ## Релизные файлы
 
-GitHub Actions публикует:
+GitHub Actions собирает static Linux archives:
 
 ```text
-TG-Proxy-Relay-v<version>-linux-{amd64,386,arm64,armv7,armv6,armv5}.tar.gz
-TG-Proxy-Relay-v<version>-linux-{riscv64,ppc64,ppc64le,s390x,loong64}.tar.gz
-TG-Proxy-Relay-v<version>-linux-{mips,mipsle,mips64,mips64le}.tar.gz
-SHA256SUMS.txt
+amd64, 386, arm64, armv7, armv6, armv5,
+riscv64, ppc64, ppc64le, s390x, loong64,
+mips, mipsle, mips64, mips64le
 ```
 
-Для большинства обычных x86-64 VPS нужен `linux-amd64`; для 64-битного ARM — `linux-arm64`.
-Android-мастер сам сопоставляет `uname -m` с правильным asset, проверяет checksum и версию
-до замены бинарника.
+Каждый архив содержит binary, README, LICENSE, `config.example.json`, docs и service template.
+`SHA256SUMS.txt` публикуется рядом. Android-мастер автоматически выбирает architecture и
+проверяет checksum/version до замены binary.
 
-## Установка
+## Ручная установка
 
-Ручная установка описана в [docs/INSTALL.md](docs/INSTALL.md).
-Если используется TG Proxy Android, удобнее открыть **Настройки -> Relay -> Автонастройка VPS**.
+Для администратора, которому не нужен Android auto-setup:
 
-## Reverse proxy
+1. [выберите VPS и откройте порты](docs/VPS_REQUIREMENTS.md);
+2. [скачайте asset, создайте hashes и service](docs/INSTALL.md);
+3. [настройте безопасный reverse proxy](docs/REVERSE_PROXY.md);
+4. [проверьте и обновляйте сервер](docs/UPDATES.md).
 
-Relay обычно слушает `127.0.0.1:18080`, а наружу публикуется через nginx, Caddy или Apache по
-HTTPS. Android-мастер умеет полностью настроить чистый VPS по публичному IP, DuckDNS или уже
-имеющемуся домену, включая certificate и renewal timer/cron. Мастер не привязан к Ubuntu:
-поддерживаются systemd, OpenRC, runit и SysV, а пакеты устанавливаются через пакетный менеджер
-обнаруженного Linux-дистрибутива.
-Безопасные path-based примеры есть в [docs/REVERSE_PROXY.md](docs/REVERSE_PROXY.md).
-
-## Токены
-
-На сервере хранятся хэши токенов, а не raw-токены:
-
-```bash
-tgproxy-relay -token "long-random-token" -print-token-hash
-```
-
-Полученный hash записывается в `config.json`. Подробнее: [docs/TOKENS.md](docs/TOKENS.md).
-
-## Управление владельца
-
-Начиная с `1.1.0`, владелец VPS может из Android-приложения:
-
-- видеть существующие клиентские токены;
-- создать новый токен и получить его raw-значение один раз;
-- немедленно отозвать токен и закрыть его активные сессии;
-- видеть привязанные устройства: марку, модель, версию приложения/Android,
-  первое и последнее подключение, активные сессии, страну и город.
-- отключить только сессии выбранного устройства, заблокировать и разблокировать его без
-  отзыва общего token.
-
-Доступ выдаётся только отдельным owner-token из `admin.tokens`. Динамическое состояние
-хранится в `/var/lib/tgproxy-relay/state.json`; raw клиентские токены в этот файл не попадают.
-Внешнее GeoIP-определение можно отключить значением `"geoIpUrl": ""`.
-
-Контракт API и конфигурации: [docs/API.md](docs/API.md), [docs/TOKENS.md](docs/TOKENS.md).
-
-## Ссылки подключения
-
-Relay публикует landing page:
-
-```text
-GET /connect
-GET <websocket.path>/connect
-```
-
-Android создаёт HTTPS-ссылку вида
-`https://relay.example.com/apiws/connect#data=<payload>`. Fragment после `#` не отправляется
-на сервер и локально преобразуется страницей в `tgproxy://import?...`. Та же payload-модель
-используется для QR-кода, системного меню «Поделиться» и импорта из файла. SSH-данные и
-owner-token в клиентское подключение не входят.
-
-## Telegram topology
-
-Relay 1.2.0 принимает несколько IPv4/IPv6 endpoints и произвольный port на DC, разделяет
-regular/media/CDN pools, быстро гоняет альтернативы и ведёт endpoint-level cooldown. Новый
-signed topology manifest обновляется без APK и без ручного редактирования каждого клиента:
-
-```text
-signed current -> atomic LKG -> embedded owner bootstrap
-```
-
-Android и Relay согласуют protocol/features/current DC revision через `/capabilities`.
-Неизвестный DC не превращается в client-supplied destination: адрес выбирается только из
-server-side owner config или проверенного Ed25519 bundle. Настройка и signing CLI описаны в
-[docs/TOPOLOGY.md](docs/TOPOLOGY.md).
-
-## Автонастройка из Android
-
-TG Proxy Android умеет:
-
-- проверить VPS без изменений;
-- найти уже установленный совместимый Relay;
-- добавить новый token в существующий Relay;
-- установить или обновить Relay, если пользователь владеет VPS;
-- сохранить SSH/owner-данные локально в зашифрованном хранилище Android;
-- управлять токенами и подключёнными устройствами;
-- импортировать подключение без SSH-данных.
-
-Подробнее: [docs/ANDROID_AUTO_SETUP.md](docs/ANDROID_AUTO_SETUP.md).
+Не публикуйте standalone HTTP в интернет. Production endpoint должен использовать HTTPS/WSS.
 
 ## Документация
 
-- [Установка](docs/INSTALL.md)
+- [Единый индекс](docs/README.md)
+- [Требования к VPS](docs/VPS_REQUIREMENTS.md)
+- [Автонастройка Android](docs/ANDROID_AUTO_SETUP.md)
+- [Ручная установка](docs/INSTALL.md)
 - [Reverse proxy](docs/REVERSE_PROXY.md)
 - [API](docs/API.md)
 - [Токены](docs/TOKENS.md)
-- [Обновления](docs/UPDATES.md)
-- [Автонастройка Android](docs/ANDROID_AUTO_SETUP.md)
 - [Telegram topology и signing](docs/TOPOLOGY.md)
+- [Обновления](docs/UPDATES.md)
+- [Устранение проблем](docs/TROUBLESHOOTING.md)
+- [Разработка](docs/DEVELOPMENT.md)
+- [Релизы](docs/RELEASES.md)
+- [Поддержка](SUPPORT.md)
 
-## Сборка
+## Разработка
 
 ```bash
+test -z "$(gofmt -l .)"
+go vet ./...
 go test ./...
 go build -trimpath -o tgproxy-relay ./cmd/tgproxy-relay
 ```
 
-Release workflow задаёт `internal/relay.Version` из Git-тега.
+Официальный tag `v*` запускает release workflow и публикует все archives с checksums.
 
 ## Безопасность
 
-Не публикуйте raw-токены, SSH-данные, приватные ключи и полные production-конфиги.
-Правила сообщения об уязвимостях описаны в [SECURITY.md](SECURITY.md).
-
-## Лицензия
-
-MIT, см. [LICENSE](LICENSE).
+Не публикуйте raw client/owner tokens, production hashes/config/state, SSH/TLS/signing keys и
+частные endpoints. Закрытое сообщение: [SECURITY.md](SECURITY.md). Лицензия: [MIT](LICENSE).

@@ -1,0 +1,30 @@
+name: Предложение функции
+description: Улучшение Relay, API, topology, auto-setup или документации
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Проблема пользователя или администратора
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Предлагаемое решение
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Совместимость и риски
+      description: Укажите влияние на Android, protocol, config migration, security и ресурсы.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Проверка
+      options:
+        - label: В описании нет production secrets, реальных приватных endpoints и персональных данных.
+          required: true

@@ -1,5 +1,9 @@
 # Установка TG Proxy VPS Relay
 
+Для выбора подходящего сервера, Linux, ресурсов и firewall сначала прочитайте
+[VPS_REQUIREMENTS.md](VPS_REQUIREMENTS.md). Новичкам рекомендуется автонастройка из TG Proxy
+Android; команды ниже предназначены для ручного администрирования.
+
 ## Требования
 
 - Linux VPS. Для автонастройки из Android поддерживаются `systemd`, OpenRC, runit, SysV init
@@ -135,11 +139,13 @@ journalctl -u tgproxy-relay -f
 ## Проверка
 
 ```bash
-curl -H "Authorization: Bearer replace-with-raw-token" \
+read -rsp 'Client token: ' TGPROXY_CLIENT_TOKEN; echo
+curl -H "Authorization: Bearer ${TGPROXY_CLIENT_TOKEN}" \
   https://relay.example.com/apiws/healthz
 
-curl -H "Authorization: Bearer replace-with-raw-token" \
+curl -H "Authorization: Bearer ${TGPROXY_CLIENT_TOKEN}" \
   https://relay.example.com/apiws/capabilities
+unset TGPROXY_CLIENT_TOKEN
 ```
 
 Ожидаемый ответ:
@@ -151,8 +157,10 @@ ok
 Owner API:
 
 ```bash
-curl -H "Authorization: Bearer replace-with-owner-token" \
+read -rsp 'Owner token: ' TGPROXY_OWNER_TOKEN; echo
+curl -H "Authorization: Bearer ${TGPROXY_OWNER_TOKEN}" \
   https://relay.example.com/apiws/admin/v1/overview
+unset TGPROXY_OWNER_TOKEN
 ```
 
 Проверьте также `https://relay.example.com/apiws/connect`: должна открыться страница

@@ -5,4 +5,20 @@
 dist/
 release-artifacts/
 /tgproxy-relay
+/tgproxy-relay-*
 tgproxy-relay.exe
+gitleaks-report.*
+gitleaks-*.json
+gitleaks-*.sarif
+
+# Production configuration/state, credentials and locally packaged releases.
+/config.json
+/state.json
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.tar.gz

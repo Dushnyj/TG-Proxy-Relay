@@ -328,7 +328,7 @@ func webSocketUpgradeStatus(t *testing.T, rawURL, path, token, deviceID string) 
 	}
 	defer conn.Close()
 	request := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\n"+
-		"Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGVzdC10ZXN0LXRlc3Q=\r\n"+
+		"Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGVzdC10ZXN0LXRlc3Q=\r\n"+ // gitleaks:allow
 		"Sec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: tgproxy-relay.v2, binary\r\n"+
 		"X-TGProxy-Device-ID: %s\r\n\r\n", path, parsed.Host, token, deviceID)
 	if _, err := conn.Write([]byte(request)); err != nil {

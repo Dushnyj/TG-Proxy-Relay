@@ -1,0 +1,53 @@
+name: Автонастройка VPS из Android
+description: SSH-аудит, Linux-совместимость, установка, HTTPS, обновление или rollback
+title: "[Auto setup] "
+labels:
+  - bug
+  - auto-setup
+body:
+  - type: input
+    id: versions
+    attributes:
+      label: Версии TG Proxy Android и Relay
+      placeholder: "Android 1.2.0; Relay 1.2.0 или не установлен"
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Linux, архитектура, package manager и init
+      placeholder: "Alpine 3.22, arm64, apk, OpenRC"
+    validations:
+      required: true
+  - type: dropdown
+    id: endpoint
+    attributes:
+      label: Публичный адрес
+      options:
+        - Публичный IP
+        - DuckDNS
+        - Свой домен / поддомен
+    validations:
+      required: true
+  - type: textarea
+    id: step
+    attributes:
+      label: Этап, сообщение и шаги
+      description: Приложите обезличенный скриншот пользовательского сообщения.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Полный диагностический ZIP Android
+      description: Перетащите ZIP после воспроизведения; предварительно проверьте его.
+      placeholder: Перетащите файл .zip
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Приватность
+      options:
+        - label: Я не публикую SSH password/key, raw client/owner/DuckDNS token, production config/state или реальные private domains/IP.
+          required: true

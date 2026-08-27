@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Инструкция поддержки
+    url: https://github.com/Dushnyj/TG-Proxy-Relay/blob/main/SUPPORT.md
+    about: Диагностика Android и обезличенные проверки сервера
+  - name: Сообщить об уязвимости закрыто
+    url: https://github.com/Dushnyj/TG-Proxy-Relay/security/advisories/new
+    about: Не публикуйте tokens, keys, configs и уязвимости в обычных issues

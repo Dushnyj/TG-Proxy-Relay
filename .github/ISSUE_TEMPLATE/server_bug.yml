@@ -1,0 +1,61 @@
+name: Ошибка Relay
+description: Service, WebSocket, Telegram route, media, owner API или token lifecycle
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Версия Relay
+      placeholder: "1.2.0"
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Linux, архитектура и init
+      placeholder: "Debian 13, amd64, systemd"
+    validations:
+      required: true
+  - type: input
+    id: reverse_proxy
+    attributes:
+      label: Reverse proxy
+      placeholder: "nginx 1.26 / Caddy / Apache / нет"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Шаги воспроизведения
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ожидаемое поведение
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Фактическое поведение
+    validations:
+      required: true
+  - type: textarea
+    id: checks
+    attributes:
+      label: Обезличенные проверки
+      description: Версия, check-config, service status и HTTP status health/version/capabilities/test-routes. Не вставляйте raw token или полный config.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Приватность
+      options:
+        - label: Я удалил реальные IP/domains, raw tokens, production hashes, SSH/TLS/signing keys, config/state и персональные данные.
+          required: true
+        - label: Я использую последнюю опубликованную версию и проверил существующие issues.
+          required: true

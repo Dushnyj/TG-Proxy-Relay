@@ -37,6 +37,15 @@
   службу для systemd/OpenRC/runit/SysV либо переносимый init-script и настраивает renewal через
   systemd timer или cron.
 
+### Публичный репозиторий и поддержка
+
+- Добавлены единый индекс документации, требования к VPS, troubleshooting, development и
+  release runbook, а также связанные Android-инструкции для DuckDNS, QR и диагностики.
+- Issue Forms разделяют server bug, Android auto-setup и feature request и требуют удалить
+  tokens, production config/state, SSH/TLS keys и частные endpoints.
+- Добавлены CI, Dependabot и full-history Gitleaks workflow; примеры используют только
+  `example.com` и RFC 5737 адреса.
+
 ## [1.1.0] - 2026-08-27
 
 ### Добавлено
