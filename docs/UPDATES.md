@@ -16,7 +16,7 @@ systemd. Команды ниже оставлены как ручной прим
 
 ```bash
 set -euo pipefail
-version=1.2.0
+version=1.3.0
 asset="TG-Proxy-Relay-v${version}-linux-amd64.tar.gz"
 base="https://github.com/Dushnyj/TG-Proxy-Relay/releases/download/v${version}"
 

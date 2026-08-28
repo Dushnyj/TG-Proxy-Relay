@@ -208,7 +208,7 @@ func TestValidateRejectsUnsafeOrReservedWebSocketPath(t *testing.T) {
 	for _, path := range []string{
 		"relative", "/", "/apiws/", "/nested//apiws", "/nested/../apiws",
 		"/apiws%2Fprivate", "/apiws?x=1", "/healthz", "/connect", "/admin",
-		"/admin/v1", "/apiws/connect", "/apiws/admin/v1/tokens", "/bad path",
+		"/admin/v1", "/apiws/connect", "/apiws/identity", "/apiws/admin/v1/tokens", "/bad path",
 	} {
 		cfg.WebSocket.Path = path
 		if err := cfg.Validate(); err == nil {

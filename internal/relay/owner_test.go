@@ -83,6 +83,154 @@ func TestOwnerAPISeparatesRolesAndPersistsDynamicTokenDeletion(t *testing.T) {
 	}
 }
 
+func TestOwnerTokenCreationIsIdempotentAndDeletedRequestCannotResurrect(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	server := newOwnerServer(t, statePath, &fakeDialer{})
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+
+	secretBytes := bytes.Repeat([]byte{0x4a}, 32)
+	secret := "tgpr_" + base64.RawURLEncoding.EncodeToString(secretBytes)
+	body, _ := json.Marshal(map[string]string{
+		"name": "Телефон", "secret": secret, "idempotencyKey": "req_fixed_12345678",
+	})
+	create := func() (ownerCreatedToken, int) {
+		request, _ := http.NewRequest(http.MethodPost, ts.URL+"/admin/v1/tokens", bytes.NewReader(body))
+		request.Header.Set("Authorization", "Bearer owner-token")
+		request.Header.Set("Content-Type", "application/json")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		var created ownerCreatedToken
+		if response.StatusCode == http.StatusCreated {
+			if err := json.NewDecoder(response.Body).Decode(&created); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return created, response.StatusCode
+	}
+	first, status := create()
+	if status != http.StatusCreated || first.Secret != secret || first.Token.ID == "" {
+		t.Fatalf("first idempotent create = %d %+v", status, first)
+	}
+	second, status := create()
+	if status != http.StatusCreated || second.Token.ID != first.Token.ID || second.Secret != secret {
+		t.Fatalf("idempotent replay created another credential: %d first=%+v second=%+v",
+			status, first, second)
+	}
+
+	request, _ := http.NewRequest(http.MethodDelete,
+		ts.URL+"/admin/v1/tokens/"+url.PathEscape(first.Token.ID), nil)
+	request.Header.Set("Authorization", "Bearer owner-token")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete status = %d", response.StatusCode)
+	}
+	if _, status = create(); status != http.StatusConflict {
+		t.Fatalf("deleted idempotency request was resurrected: %d", status)
+	}
+}
+
+func TestRelayIdentityIsStableAcrossRestartAndAuthenticatedEndpoint(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	server := newOwnerServer(t, statePath, &fakeDialer{})
+	ts := httptest.NewServer(server.Handler())
+	created := createOwnerToken(t, ts.URL+"/admin/v1/tokens", "persist identity")
+	if created.Token.ID == "" {
+		t.Fatal("token creation did not cross the state persistence boundary")
+	}
+	identity := readRelayIdentity(t, ts.URL+"/identity")
+	ts.Close()
+	if !config.ValidInstanceID(identity) {
+		t.Fatalf("invalid Relay identity %q", identity)
+	}
+
+	restarted := newOwnerServer(t, statePath, &fakeDialer{})
+	restartedHTTP := httptest.NewServer(restarted.Handler())
+	defer restartedHTTP.Close()
+	if actual := readRelayIdentity(t, restartedHTTP.URL+"/apiws/identity"); actual != identity {
+		t.Fatalf("Relay identity changed across restart: before=%q after=%q", identity, actual)
+	}
+}
+
+func TestOwnerMigratesPreviousDeviceIdentityAndKeepsFriendlyMetadata(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	firstRelay, firstPeer := net.Pipe()
+	server := newOwnerServer(t, statePath, singleUseDialer{conn: firstRelay})
+	ts := httptest.NewServer(server.Handler())
+	first := dialWebSocketHeaders(t, ts.URL, "/apiws?dc=2&media=0", "client-token", map[string]string{
+		"X-TGProxy-Device-ID":    "dev_11111111111111111111111111111111",
+		"X-TGProxy-Manufacturer": "Xiaomi", "X-TGProxy-Model": "2407FPN8EG",
+	})
+	_ = first.Close()
+	_ = firstPeer.Close()
+	waitForFileContains(t, statePath, `"deviceId": "dev_11111111111111111111111111111111"`)
+	ts.Close()
+
+	secondRelay, secondPeer := net.Pipe()
+	defer secondPeer.Close()
+	restarted := newOwnerServer(t, statePath, singleUseDialer{conn: secondRelay})
+	restartedHTTP := httptest.NewServer(restarted.Handler())
+	defer restartedHTTP.Close()
+	second := dialWebSocketHeaders(t, restartedHTTP.URL, "/apiws?dc=2&media=0", "client-token", map[string]string{
+		"X-TGProxy-Device-ID":          "dev2_22222222222222222222222222222222",
+		"X-TGProxy-Previous-Device-ID": "dev_11111111111111111111111111111111",
+		"X-TGProxy-Identity-Version":   "2", "X-TGProxy-Manufacturer": "Xiaomi",
+		"X-TGProxy-Brand": "Xiaomi", "X-TGProxy-Canonical-Brand": "Xiaomi",
+		"X-TGProxy-Model": "2407FPN8EG", "X-TGProxy-Device-Name": "Xiaomi 14T Pro",
+		"X-TGProxy-Device-Code": "rothko", "X-TGProxy-Product": "rothko_global",
+	})
+	defer second.Close()
+
+	request, _ := http.NewRequest(http.MethodGet, restartedHTTP.URL+"/admin/v1/overview", nil)
+	request.Header.Set("Authorization", "Bearer owner-token")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var overview struct {
+		Clients []struct {
+			DeviceID, IdentityVersion, CanonicalBrand, Model, MarketingName string
+		} `json:"clients"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&overview); err != nil {
+		t.Fatal(err)
+	}
+	if len(overview.Clients) != 1 || overview.Clients[0].DeviceID != "dev2_22222222222222222222222222222222" ||
+		overview.Clients[0].IdentityVersion != "2" || overview.Clients[0].CanonicalBrand != "Xiaomi" ||
+		overview.Clients[0].MarketingName != "Xiaomi 14T Pro" {
+		t.Fatalf("device identity was not migrated cleanly: %+v", overview.Clients)
+	}
+}
+
+func readRelayIdentity(t *testing.T, endpoint string) string {
+	t.Helper()
+	request, _ := http.NewRequest(http.MethodGet, endpoint, nil)
+	request.Header.Set("Authorization", "Bearer client-token")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("identity status = %d", response.StatusCode)
+	}
+	var body struct {
+		InstanceID string `json:"instanceId"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	return body.InstanceID
+}
+
 func TestOwnerAPIRevokesConfiguredTokenAcrossRestart(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	server := newOwnerServer(t, statePath, &fakeDialer{})

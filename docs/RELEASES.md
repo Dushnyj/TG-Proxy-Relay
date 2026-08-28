@@ -22,9 +22,9 @@
 ## Создать релиз
 
 ```bash
-git tag -a v1.2.0 -m "TG Proxy VPS Relay v1.2.0"
+git tag -a v1.3.0 -m "TG Proxy VPS Relay v1.3.0"
 git push origin main
-git push origin v1.2.0
+git push origin v1.3.0
 ```
 
 `.github/workflows/release.yml` сверяет тег с `VERSION`, запускает тесты, а затем для каждой

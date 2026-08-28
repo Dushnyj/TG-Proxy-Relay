@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	controlStateVersion = 2
+	controlStateVersion = 3
 	maxControlBodyBytes = 32 * 1024
 	maxTrackedClients   = 4096
 	maxLocationCache    = 2048
@@ -51,27 +51,35 @@ type controlPlane struct {
 }
 
 type controlState struct {
-	Version        int                       `json:"version"`
-	AddedTokens    []config.Token            `json:"addedTokens,omitempty"`
-	RevokedHashes  []string                  `json:"revokedHashes,omitempty"`
-	Clients        map[string]*trackedClient `json:"clients,omitempty"`
-	BlockedDevices map[string]string         `json:"blockedDevices,omitempty"`
+	Version         int                       `json:"version"`
+	InstanceID      string                    `json:"instanceId,omitempty"`
+	AddedTokens     []config.Token            `json:"addedTokens,omitempty"`
+	RevokedHashes   []string                  `json:"revokedHashes,omitempty"`
+	DeletedTokenIDs []string                  `json:"deletedTokenIds,omitempty"`
+	Clients         map[string]*trackedClient `json:"clients,omitempty"`
+	BlockedDevices  map[string]string         `json:"blockedDevices,omitempty"`
 }
 
 type trackedClient struct {
-	Key          string `json:"key"`
-	TokenID      string `json:"tokenId"`
-	DeviceID     string `json:"deviceId"`
-	Manufacturer string `json:"manufacturer,omitempty"`
-	Model        string `json:"model,omitempty"`
-	AppVersion   string `json:"appVersion,omitempty"`
-	AppCode      string `json:"appCode,omitempty"`
-	Android      string `json:"android,omitempty"`
-	Country      string `json:"country,omitempty"`
-	City         string `json:"city,omitempty"`
-	RemoteIP     string `json:"remoteIp,omitempty"`
-	FirstSeen    string `json:"firstSeen"`
-	LastSeen     string `json:"lastSeen"`
+	Key             string `json:"key"`
+	TokenID         string `json:"tokenId"`
+	DeviceID        string `json:"deviceId"`
+	IdentityVersion string `json:"identityVersion,omitempty"`
+	Manufacturer    string `json:"manufacturer,omitempty"`
+	Brand           string `json:"brand,omitempty"`
+	CanonicalBrand  string `json:"canonicalBrand,omitempty"`
+	Model           string `json:"model,omitempty"`
+	MarketingName   string `json:"marketingName,omitempty"`
+	Device          string `json:"device,omitempty"`
+	Product         string `json:"product,omitempty"`
+	AppVersion      string `json:"appVersion,omitempty"`
+	AppCode         string `json:"appCode,omitempty"`
+	Android         string `json:"android,omitempty"`
+	Country         string `json:"country,omitempty"`
+	City            string `json:"city,omitempty"`
+	RemoteIP        string `json:"remoteIp,omitempty"`
+	FirstSeen       string `json:"firstSeen"`
+	LastSeen        string `json:"lastSeen"`
 }
 
 type trackedSession struct {
@@ -107,21 +115,34 @@ type tokenView struct {
 }
 
 type clientView struct {
-	TokenID        string `json:"tokenId"`
-	DeviceID       string `json:"deviceId"`
-	Manufacturer   string `json:"manufacturer,omitempty"`
-	Model          string `json:"model,omitempty"`
-	AppVersion     string `json:"appVersion,omitempty"`
-	AppCode        string `json:"appCode,omitempty"`
-	Android        string `json:"android,omitempty"`
-	Country        string `json:"country,omitempty"`
-	City           string `json:"city,omitempty"`
-	RemoteIP       string `json:"remoteIp,omitempty"`
-	FirstSeen      string `json:"firstSeen"`
-	LastSeen       string `json:"lastSeen"`
-	ActiveSessions int    `json:"activeSessions"`
-	Blocked        bool   `json:"blocked"`
-	BlockedAt      string `json:"blockedAt,omitempty"`
+	TokenID         string `json:"tokenId"`
+	DeviceID        string `json:"deviceId"`
+	IdentityVersion string `json:"identityVersion,omitempty"`
+	Manufacturer    string `json:"manufacturer,omitempty"`
+	Brand           string `json:"brand,omitempty"`
+	CanonicalBrand  string `json:"canonicalBrand,omitempty"`
+	Model           string `json:"model,omitempty"`
+	MarketingName   string `json:"marketingName,omitempty"`
+	Device          string `json:"device,omitempty"`
+	Product         string `json:"product,omitempty"`
+	AppVersion      string `json:"appVersion,omitempty"`
+	AppCode         string `json:"appCode,omitempty"`
+	Android         string `json:"android,omitempty"`
+	Country         string `json:"country,omitempty"`
+	City            string `json:"city,omitempty"`
+	RemoteIP        string `json:"remoteIp,omitempty"`
+	FirstSeen       string `json:"firstSeen"`
+	LastSeen        string `json:"lastSeen"`
+	ActiveSessions  int    `json:"activeSessions"`
+	Blocked         bool   `json:"blocked"`
+	BlockedAt       string `json:"blockedAt,omitempty"`
+}
+
+type requestDeviceIdentity struct {
+	tokenID          string
+	deviceID         string
+	previousDeviceID string
+	legacyDeviceID   string
 }
 
 type overviewResponse struct {
@@ -156,6 +177,20 @@ func newControlPlane(cfg config.Config) (*controlPlane, error) {
 			return nil, err
 		}
 	}
+	configuredInstanceID := strings.TrimSpace(cfg.InstanceID)
+	if configuredInstanceID != "" {
+		if control.state.InstanceID != "" && control.state.InstanceID != configuredInstanceID {
+			return nil, errors.New("configured instanceId conflicts with the persisted Relay identity")
+		}
+		control.state.InstanceID = configuredInstanceID
+	}
+	if control.state.InstanceID == "" {
+		instanceID, err := generateInstanceID()
+		if err != nil {
+			return nil, fmt.Errorf("generate Relay instance identity: %w", err)
+		}
+		control.state.InstanceID = instanceID
+	}
 	if template := strings.TrimSpace(cfg.Admin.GeoIPURL); template != "" {
 		control.resolver = &httpGeoIPResolver{
 			template: template,
@@ -163,6 +198,28 @@ func newControlPlane(cfg config.Config) (*controlPlane, error) {
 		}
 	}
 	return control, nil
+}
+
+// prepareIdentity crosses the durability boundary only when the server is about to listen.
+// Keeping this out of NewServer ensures config-validation and tests remain read-only.
+func (c *controlPlane) prepareIdentity() error {
+	if c == nil || !c.enabled() || c.statePath == "" {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.persistCriticalLocked(); err != nil {
+		return fmt.Errorf("persist Relay instance identity: %w", err)
+	}
+	return nil
+}
+
+func generateInstanceID() (string, error) {
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return "ri_" + hex.EncodeToString(raw), nil
 }
 
 func cloneTokens(source []config.Token) []config.Token {
@@ -242,40 +299,95 @@ func constantHashEqual(left, right string) bool {
 	return different == 0
 }
 
-func (c *controlPlane) createToken(name string) (config.Token, string, error) {
+func (c *controlPlane) createToken(name, requestedSecret, idempotencyKey string) (config.Token, string, bool, error) {
 	if c == nil || !c.enabled() {
-		return config.Token{}, "", errors.New("owner API is disabled")
+		return config.Token{}, "", false, errors.New("owner API is disabled")
 	}
 	cleanName := sanitizeDisplay(name, 128)
 	if cleanName == "" {
 		cleanName = "Подключение"
 	}
-	rawBytes := make([]byte, 32)
-	if _, err := rand.Read(rawBytes); err != nil {
-		return config.Token{}, "", err
+	raw := strings.TrimSpace(requestedSecret)
+	cleanKey := sanitizeIdentifier(idempotencyKey, 96)
+	if idempotencyKey != "" && cleanKey == "" {
+		return config.Token{}, "", false, errors.New("invalid idempotency key")
 	}
-	idBytes := make([]byte, 12)
-	if _, err := rand.Read(idBytes); err != nil {
-		return config.Token{}, "", err
+	if raw != "" && !validClientSecret(raw) {
+		return config.Token{}, "", false, errors.New("invalid client secret")
 	}
-	raw := "tgpr_" + base64.RawURLEncoding.EncodeToString(rawBytes)
+	if cleanKey != "" && raw == "" {
+		return config.Token{}, "", false, errors.New("idempotent token creation requires a client-generated secret")
+	}
+	if raw == "" {
+		rawBytes := make([]byte, 32)
+		if _, err := rand.Read(rawBytes); err != nil {
+			return config.Token{}, "", false, err
+		}
+		raw = "tgpr_" + base64.RawURLEncoding.EncodeToString(rawBytes)
+	}
+	tokenID := ""
+	if cleanKey != "" {
+		digest := sha256.Sum256([]byte("tgproxy-token-request:" + cleanKey))
+		tokenID = "tok_" + hex.EncodeToString(digest[:12])
+	} else {
+		idBytes := make([]byte, 12)
+		if _, err := rand.Read(idBytes); err != nil {
+			return config.Token{}, "", false, err
+		}
+		tokenID = "tok_" + hex.EncodeToString(idBytes)
+	}
 	token := config.Token{
-		ID:        "tok_" + hex.EncodeToString(idBytes),
+		ID:        tokenID,
 		Name:      cleanName,
 		Hash:      config.TokenHash(raw),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if cleanKey != "" {
+		if containsString(c.state.DeletedTokenIDs, tokenID) {
+			return config.Token{}, "", false, errors.New("idempotency key belongs to a deleted token")
+		}
+		for _, existing := range c.allTokensLocked() {
+			if config.StableTokenID(existing) != tokenID {
+				continue
+			}
+			if !constantHashEqual(existing.Hash, token.Hash) {
+				return config.Token{}, "", false, errors.New("idempotency key is already associated with another secret")
+			}
+			if sanitizeDisplay(existing.Name, 128) != cleanName {
+				return config.Token{}, "", false, errors.New("idempotency key is already associated with another token name")
+			}
+			existing.ID = tokenID
+			return existing, raw, true, nil
+		}
+	}
 	if len(c.allTokensLocked()) >= 1024 {
-		return config.Token{}, "", errors.New("too many tokens")
+		return config.Token{}, "", false, errors.New("too many tokens")
 	}
 	c.state.AddedTokens = append(c.state.AddedTokens, token)
 	if err := c.persistCriticalLocked(); err != nil {
 		c.state.AddedTokens = c.state.AddedTokens[:len(c.state.AddedTokens)-1]
-		return config.Token{}, "", err
+		return config.Token{}, "", false, err
 	}
-	return token, raw, nil
+	return token, raw, false, nil
+}
+
+func validClientSecret(value string) bool {
+	if !strings.HasPrefix(value, "tgpr_") || len(value) < 32 || len(value) > 128 {
+		return false
+	}
+	_, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(value, "tgpr_"))
+	return err == nil
+}
+
+func (c *controlPlane) instanceIdentity() (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.state.InstanceID, c.enabled() && c.statePath != ""
 }
 
 func (c *controlPlane) deleteToken(id string) error {
@@ -306,6 +418,7 @@ func (c *controlPlane) deleteToken(id string) error {
 	}
 	previousAdded := cloneTokens(c.state.AddedTokens)
 	previousRevoked := append([]string(nil), c.state.RevokedHashes...)
+	previousDeleted := append([]string(nil), c.state.DeletedTokenIDs...)
 	removedClients := make(map[string]*trackedClient)
 	removedBlocked := make(map[string]string)
 	filtered := c.state.AddedTokens[:0]
@@ -323,6 +436,15 @@ func (c *controlPlane) deleteToken(id string) error {
 		}
 		c.state.RevokedHashes = append(c.state.RevokedHashes, hash)
 	}
+	if strings.HasPrefix(cleanID, "tok_") && !containsString(c.state.DeletedTokenIDs, cleanID) {
+		if len(c.state.DeletedTokenIDs) >= 2048 {
+			c.state.AddedTokens = previousAdded
+			c.state.RevokedHashes = previousRevoked
+			c.mu.Unlock()
+			return errors.New("too many persisted deleted token ids")
+		}
+		c.state.DeletedTokenIDs = append(c.state.DeletedTokenIDs, cleanID)
+	}
 	for key, client := range c.state.Clients {
 		if client != nil && client.TokenID == cleanID {
 			removedClients[key] = client
@@ -336,6 +458,7 @@ func (c *controlPlane) deleteToken(id string) error {
 	if err := c.persistCriticalLocked(); err != nil {
 		c.state.AddedTokens = previousAdded
 		c.state.RevokedHashes = previousRevoked
+		c.state.DeletedTokenIDs = previousDeleted
 		for key, client := range removedClients {
 			c.state.Clients[key] = client
 		}
@@ -362,27 +485,58 @@ func (c *controlPlane) deviceBlocked(token config.Token, r *http.Request) bool {
 	if c == nil || !c.enabled() {
 		return false
 	}
-	tokenID, deviceID := sessionIdentity(token, r)
-	key := tokenID + ":" + deviceID
+	identity := sessionIdentityDetails(token, r)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	_, blocked := c.state.BlockedDevices[key]
-	return blocked
+	for _, deviceID := range identity.candidateDeviceIDs() {
+		if _, blocked := c.state.BlockedDevices[identity.tokenID+":"+deviceID]; blocked {
+			return true
+		}
+	}
+	return false
 }
 
 func sessionIdentity(token config.Token, r *http.Request) (string, string) {
+	identity := sessionIdentityDetails(token, r)
+	return identity.tokenID, identity.deviceID
+}
+
+func sessionIdentityDetails(token config.Token, r *http.Request) requestDeviceIdentity {
 	tokenID := config.StableTokenID(token)
 	deviceID := ""
+	previousDeviceID := ""
 	remoteIP := ""
 	if r != nil {
 		deviceID = sanitizeIdentifier(r.Header.Get("X-TGProxy-Device-ID"), 96)
+		previousDeviceID = sanitizeIdentifier(r.Header.Get("X-TGProxy-Previous-Device-ID"), 96)
 		remoteIP = clientRemoteIP(r)
 	}
+	legacySum := sha256.Sum256([]byte(tokenID + "\n" + remoteIP))
+	legacyDeviceID := "legacy_" + hex.EncodeToString(legacySum[:8])
 	if deviceID == "" {
-		sum := sha256.Sum256([]byte(tokenID + "\n" + remoteIP))
-		deviceID = "legacy_" + hex.EncodeToString(sum[:8])
+		deviceID = legacyDeviceID
+		previousDeviceID = ""
+	} else if !strings.HasPrefix(deviceID, "dev2_") ||
+		!strings.HasPrefix(previousDeviceID, "dev_") || previousDeviceID == deviceID {
+		// The migration alias is intentionally narrow. A token holder must not be able to
+		// merge arbitrary owner-visible device history by supplying an unrelated ID.
+		previousDeviceID = ""
 	}
-	return tokenID, deviceID
+	return requestDeviceIdentity{
+		tokenID: tokenID, deviceID: deviceID, previousDeviceID: previousDeviceID,
+		legacyDeviceID: legacyDeviceID,
+	}
+}
+
+func (i requestDeviceIdentity) candidateDeviceIDs() []string {
+	result := make([]string, 0, 3)
+	for _, value := range []string{i.deviceID, i.previousDeviceID, i.legacyDeviceID} {
+		if value == "" || containsString(result, value) {
+			continue
+		}
+		result = append(result, value)
+	}
+	return result
 }
 
 func (c *controlPlane) disconnectDevice(tokenID, deviceID string) error {
@@ -468,7 +622,8 @@ func (c *controlPlane) registerSession(token config.Token, r *http.Request,
 	if c == nil || !c.enabled() {
 		return func() {}, true
 	}
-	tokenID, deviceID := sessionIdentity(token, r)
+	identity := sessionIdentityDetails(token, r)
+	tokenID, deviceID := identity.tokenID, identity.deviceID
 	remoteIP := clientRemoteIP(r)
 	clientKey := tokenID + ":" + deviceID
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -481,21 +636,30 @@ func (c *controlPlane) registerSession(token config.Token, r *http.Request,
 		c.mu.Unlock()
 		return func() {}, false
 	}
-	if _, blocked := c.state.BlockedDevices[clientKey]; blocked {
-		c.mu.Unlock()
-		return func() {}, false
+	for _, candidateID := range identity.candidateDeviceIDs() {
+		if _, blocked := c.state.BlockedDevices[tokenID+":"+candidateID]; blocked {
+			c.mu.Unlock()
+			return func() {}, false
+		}
 	}
 	c.pruneClientsLocked()
+	c.migrateClientIdentityLocked(identity, r, remoteIP)
 	client := c.state.Clients[clientKey]
 	if client == nil {
 		client = &trackedClient{Key: clientKey, TokenID: tokenID, DeviceID: deviceID, FirstSeen: now}
 		c.state.Clients[clientKey] = client
 	}
-	client.Manufacturer = sanitizeDisplay(r.Header.Get("X-TGProxy-Manufacturer"), 96)
-	client.Model = sanitizeDisplay(r.Header.Get("X-TGProxy-Model"), 128)
-	client.AppVersion = sanitizeDisplay(r.Header.Get("X-TGProxy-App-Version"), 64)
-	client.AppCode = sanitizeDisplay(r.Header.Get("X-TGProxy-App-Code"), 32)
-	client.Android = sanitizeDisplay(r.Header.Get("X-TGProxy-Android"), 64)
+	setIfPresent(&client.IdentityVersion, r.Header.Get("X-TGProxy-Identity-Version"), 16)
+	setIfPresent(&client.Manufacturer, r.Header.Get("X-TGProxy-Manufacturer"), 96)
+	setIfPresent(&client.Brand, r.Header.Get("X-TGProxy-Brand"), 96)
+	setIfPresent(&client.CanonicalBrand, r.Header.Get("X-TGProxy-Canonical-Brand"), 96)
+	setIfPresent(&client.Model, r.Header.Get("X-TGProxy-Model"), 128)
+	setIfPresent(&client.MarketingName, r.Header.Get("X-TGProxy-Device-Name"), 160)
+	setIfPresent(&client.Device, r.Header.Get("X-TGProxy-Device-Code"), 128)
+	setIfPresent(&client.Product, r.Header.Get("X-TGProxy-Product"), 128)
+	setIfPresent(&client.AppVersion, r.Header.Get("X-TGProxy-App-Version"), 64)
+	setIfPresent(&client.AppCode, r.Header.Get("X-TGProxy-App-Code"), 32)
+	setIfPresent(&client.Android, r.Header.Get("X-TGProxy-Android"), 64)
 	client.RemoteIP = remoteIP
 	client.LastSeen = now
 	c.nextSessionID++
@@ -543,6 +707,104 @@ func (c *controlPlane) registerSession(token config.Token, r *http.Request,
 			c.mu.Unlock()
 		})
 	}, true
+}
+
+func setIfPresent(target *string, raw string, max int) {
+	if value := sanitizeDisplay(raw, max); value != "" {
+		*target = value
+	}
+}
+
+func (c *controlPlane) migrateClientIdentityLocked(identity requestDeviceIdentity,
+	r *http.Request, remoteIP string) {
+	newKey := identity.tokenID + ":" + identity.deviceID
+	oldKeys := make([]string, 0, 2)
+	if identity.previousDeviceID != "" {
+		oldKeys = append(oldKeys, identity.tokenID+":"+identity.previousDeviceID)
+	}
+	// Very old clients had only an IP-derived identity. Merge it only when there is one
+	// unambiguous record for this token, IP and device metadata; NAT alone is insufficient.
+	if identity.deviceID != identity.legacyDeviceID {
+		legacyKey := identity.tokenID + ":" + identity.legacyDeviceID
+		if legacy := c.state.Clients[legacyKey]; legacy != nil &&
+			legacyMatchesRequest(legacy, r, remoteIP) {
+			oldKeys = append(oldKeys, legacyKey)
+		}
+	}
+	for _, oldKey := range oldKeys {
+		if oldKey == newKey || c.state.Clients[oldKey] == nil {
+			continue
+		}
+		c.mergeClientKeyLocked(oldKey, newKey, identity.tokenID, identity.deviceID)
+	}
+}
+
+func legacyMatchesRequest(client *trackedClient, r *http.Request, remoteIP string) bool {
+	if client == nil || remoteIP == "" || client.RemoteIP != remoteIP || r == nil {
+		return false
+	}
+	manufacturer := sanitizeDisplay(r.Header.Get("X-TGProxy-Manufacturer"), 96)
+	model := sanitizeDisplay(r.Header.Get("X-TGProxy-Model"), 128)
+	return manufacturer != "" && model != "" &&
+		strings.EqualFold(client.Manufacturer, manufacturer) &&
+		strings.EqualFold(client.Model, model)
+}
+
+func (c *controlPlane) mergeClientKeyLocked(oldKey, newKey, tokenID, deviceID string) {
+	source := c.state.Clients[oldKey]
+	if source == nil {
+		return
+	}
+	destination := c.state.Clients[newKey]
+	if destination == nil {
+		destination = source
+		destination.Key = newKey
+		destination.TokenID = tokenID
+		destination.DeviceID = deviceID
+		c.state.Clients[newKey] = destination
+	} else {
+		mergeTrackedClient(destination, source)
+	}
+	delete(c.state.Clients, oldKey)
+	if blockedAt := c.state.BlockedDevices[oldKey]; blockedAt != "" {
+		if current := c.state.BlockedDevices[newKey]; current == "" || blockedAt < current {
+			c.state.BlockedDevices[newKey] = blockedAt
+		}
+		delete(c.state.BlockedDevices, oldKey)
+	}
+	for _, sessions := range c.active {
+		for _, session := range sessions {
+			if session != nil && session.clientKey == oldKey {
+				session.clientKey = newKey
+			}
+		}
+	}
+}
+
+func mergeTrackedClient(destination, source *trackedClient) {
+	if destination == nil || source == nil {
+		return
+	}
+	if destination.FirstSeen == "" || (source.FirstSeen != "" && source.FirstSeen < destination.FirstSeen) {
+		destination.FirstSeen = source.FirstSeen
+	}
+	if source.LastSeen > destination.LastSeen {
+		destination.LastSeen = source.LastSeen
+	}
+	for _, pair := range [][2]*string{
+		{&destination.IdentityVersion, &source.IdentityVersion},
+		{&destination.Manufacturer, &source.Manufacturer}, {&destination.Brand, &source.Brand},
+		{&destination.CanonicalBrand, &source.CanonicalBrand}, {&destination.Model, &source.Model},
+		{&destination.MarketingName, &source.MarketingName}, {&destination.Device, &source.Device},
+		{&destination.Product, &source.Product}, {&destination.AppVersion, &source.AppVersion},
+		{&destination.AppCode, &source.AppCode}, {&destination.Android, &source.Android},
+		{&destination.Country, &source.Country}, {&destination.City, &source.City},
+		{&destination.RemoteIP, &source.RemoteIP},
+	} {
+		if *pair[0] == "" {
+			*pair[0] = *pair[1]
+		}
+	}
 }
 
 func (c *controlPlane) shutdown() error {
@@ -631,7 +893,10 @@ func (c *controlPlane) overview() overviewResponse {
 		knownByToken[client.TokenID][client.DeviceID] = struct{}{}
 		clients = append(clients, clientView{
 			TokenID: client.TokenID, DeviceID: client.DeviceID,
-			Manufacturer: client.Manufacturer, Model: client.Model,
+			IdentityVersion: client.IdentityVersion,
+			Manufacturer:    client.Manufacturer, Brand: client.Brand,
+			CanonicalBrand: client.CanonicalBrand, Model: client.Model,
+			MarketingName: client.MarketingName, Device: client.Device, Product: client.Product,
 			AppVersion: client.AppVersion, AppCode: client.AppCode,
 			Android: client.Android, Country: client.Country, City: client.City,
 			RemoteIP: client.RemoteIP, FirstSeen: client.FirstSeen, LastSeen: client.LastSeen,
@@ -736,11 +1001,14 @@ func (c *controlPlane) load() error {
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return errors.New("parse control state: trailing data")
 	}
-	if state.Version != 1 && state.Version != controlStateVersion {
+	if state.Version != 1 && state.Version != 2 && state.Version != controlStateVersion {
 		return fmt.Errorf("unsupported control state version %d", state.Version)
 	}
-	if state.Version == 1 {
+	if state.Version == 1 || state.Version == 2 {
 		state.Version = controlStateVersion
+	}
+	if state.InstanceID != "" && !config.ValidInstanceID(state.InstanceID) {
+		return errors.New("control state contains an invalid instance identity")
 	}
 	if state.Clients == nil {
 		state.Clients = make(map[string]*trackedClient)
@@ -749,6 +1017,7 @@ func (c *controlPlane) load() error {
 		state.BlockedDevices = make(map[string]string)
 	}
 	if len(state.AddedTokens) > 1024 || len(state.RevokedHashes) > 2048 ||
+		len(state.DeletedTokenIDs) > 2048 ||
 		len(state.Clients) > maxTrackedClients || len(state.BlockedDevices) > maxTrackedClients {
 		return errors.New("control state exceeds limits")
 	}
@@ -762,6 +1031,11 @@ func (c *controlPlane) load() error {
 		if normalized := config.NormalizeTokenHash(hash); normalized == "" ||
 			!constantHashEqual(hash, normalized) {
 			return errors.New("control state contains an invalid revoked hash")
+		}
+	}
+	for _, id := range state.DeletedTokenIDs {
+		if sanitizeIdentifier(id, 96) == "" || !strings.HasPrefix(id, "tok_") {
+			return errors.New("control state contains an invalid deleted token id")
 		}
 	}
 	for key, client := range state.Clients {

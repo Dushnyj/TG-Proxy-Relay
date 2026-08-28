@@ -27,8 +27,10 @@ TCP socket. `test=0` выбирает production topology, `test=1` — test top
 принимает `/apiws` как compatibility alias. Пути `/healthz`, `/version`, `/capabilities`, `/test-routes`,
 `/connect` и `/admin/*` зарезервированы.
 
-Android передаёт идентификатор устройства, производителя, модель, версии приложения и
-Android в заголовках `X-TGProxy-*`. Эти поля используются только owner-overview.
+Android передаёт pseudonymous device ID, migration alias, identity version, manufacturer,
+brand, canonical brand, raw model, marketing name, device/product codes, версии приложения и
+Android в заголовках `X-TGProxy-*`. Эти поля используются только owner-overview. Relay не
+принимает GPS-координаты.
 
 ## Health
 
@@ -50,14 +52,42 @@ GET /version
 ```json
 {
   "name": "tgproxy-relay",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "protocol": 1,
   "minAppProtocol": 1,
-  "ownerProtocol": 1
+  "ownerProtocol": 2,
+  "instanceId": "ri_0123456789abcdef0123456789abcdef",
+  "identityPersistent": true
 }
 ```
 
 Prefixed public endpoint: `GET /apiws/version`.
+
+## Identity
+
+```text
+GET /identity
+GET /apiws/identity
+Authorization: Bearer <raw-client-token>
+```
+
+Ответ связывает проверенный client token со стабильной установкой Relay:
+
+```json
+{
+  "instanceId": "ri_0123456789abcdef0123456789abcdef",
+  "identityPersistent": true,
+  "authenticatedTokenId": "tok_...",
+  "name": "tgproxy-relay",
+  "version": "1.3.0",
+  "protocol": 1,
+  "ownerProtocol": 2
+}
+```
+
+`instanceId` не кодирует IP/домен и сохраняется в owner state. Если durability недоступна,
+`identityPersistent=false`; Android в этом случае может использовать endpoint fallback, но не
+должен считать временный ID доказательством общей установки.
 
 ## Capabilities
 
@@ -108,7 +138,17 @@ coarse TCP-проверку main и media endpoint pools из server-side topolo
 дополнительно выполняет настоящий MTProto `req_pq/resPQ` для production main/media scopes;
 это разные уровни проверки.
 
-## Owner overview
+## Owner info и overview
+
+```text
+GET /admin/v1/info
+Authorization: Bearer <owner-token>
+```
+
+`info` возвращает `instanceId`, `identityPersistent`, server version, `ownerProtocol` и
+`publicUrl`. Prefixed вариант: `/apiws/admin/v1/info`.
+
+Overview:
 
 ```text
 GET /admin/v1/overview
@@ -132,11 +172,15 @@ Authorization: Bearer <owner-token>
   "clients": [
     {
       "tokenId": "primary",
-      "deviceId": "device_...",
+      "deviceId": "dev2_...",
+      "identityVersion": "2",
       "manufacturer": "Xiaomi",
-      "model": "Redmi Note 8 Pro",
-      "appVersion": "1.2.0",
-      "appCode": "10200",
+      "brand": "Xiaomi",
+      "canonicalBrand": "Xiaomi",
+      "model": "2407FPN8EG",
+      "marketingName": "Xiaomi 14T Pro",
+      "appVersion": "1.3.0",
+      "appCode": "10300",
       "android": "11",
       "country": "Россия",
       "city": "Москва",
@@ -160,7 +204,11 @@ POST /admin/v1/tokens
 Authorization: Bearer <owner-token>
 Content-Type: application/json
 
-{"name":"Телефон семьи"}
+{
+  "name": "Телефон семьи",
+  "secret": "tgpr_<client-generated-secret>",
+  "idempotencyKey": "req_<stable-request-id>"
+}
 ```
 
 Ответ `201 Created`:
@@ -179,6 +227,11 @@ Content-Type: application/json
 ```
 
 Поле `secret` возвращается только при создании. Relay сохраняет только SHA-256 hash.
+`secret` и `idempotencyKey` обязательны для идемпотентного protocol 2 запроса. Точный повтор
+возвращает тот же token/secret и заголовок `Idempotency-Replayed: true`. Повтор с другим
+secret/name получает conflict, а удалённый idempotent token не создаётся заново. Запрос только
+с `name` остаётся совместимым с owner protocol 1, но не защищает от дубля после потерянного
+ответа.
 
 ## Отозвать клиентский токен
 

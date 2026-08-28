@@ -24,11 +24,11 @@ proxy, выпускает certificate и включает renewal timer. Нез�
 ```bash
 mkdir -p /opt/tgproxy-relay
 cd /opt/tgproxy-relay
-asset=TG-Proxy-Relay-v1.2.0-linux-amd64.tar.gz
+asset=TG-Proxy-Relay-v1.3.0-linux-amd64.tar.gz
 curl -fL -o "$asset" \
-  "https://github.com/Dushnyj/TG-Proxy-Relay/releases/download/v1.2.0/$asset"
+  "https://github.com/Dushnyj/TG-Proxy-Relay/releases/download/v1.3.0/$asset"
 curl -L -o SHA256SUMS.txt \
-  https://github.com/Dushnyj/TG-Proxy-Relay/releases/download/v1.2.0/SHA256SUMS.txt
+  https://github.com/Dushnyj/TG-Proxy-Relay/releases/download/v1.3.0/SHA256SUMS.txt
 grep " $asset$" SHA256SUMS.txt | sha256sum -c -
 tar -xzf "$asset"
 chmod +x tgproxy-relay

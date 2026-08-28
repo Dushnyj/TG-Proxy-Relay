@@ -21,13 +21,13 @@ const (
 	Protocol          = 1
 	MaxRelayProtocol  = 2
 	MinAppProtocol    = 1
-	OwnerAPIProtocol  = 1
+	OwnerAPIProtocol  = 2
 	maxTestRoutesBody = 64 * 1024
 	maxTestRouteDCs   = 32
 	maxTestRoutesTime = 15 * time.Second
 )
 
-var Version = "1.2.0"
+var Version = "1.3.0"
 
 type Dialer interface {
 	DialContext(ctx context.Context, network string, address string) (net.Conn, error)
@@ -84,6 +84,9 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.withClientAuth(s.ignoreClientToken(s.handleHealthz)))
 	mux.HandleFunc("/version", s.withClientAuth(s.ignoreClientToken(s.handleVersion)))
+	mux.HandleFunc("/identity", s.withClientAuth(s.handleIdentity))
+	mux.HandleFunc(strings.TrimSuffix(s.cfg.WebSocket.Path, "/")+"/identity",
+		s.withClientAuth(s.handleIdentity))
 	mux.HandleFunc("/capabilities", s.withClientAuth(s.ignoreClientToken(s.handleCapabilities)))
 	mux.HandleFunc("/test-routes", s.withClientAuth(s.ignoreClientToken(s.handleTestRoutes)))
 	mux.HandleFunc(s.cfg.WebSocket.Path, s.withClientAuth(s.handleWebSocket))
@@ -97,6 +100,7 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("/apiws", s.withClientAuth(s.handleWebSocket))
 		s.registerOwnerRoutes(mux, "/apiws")
 		mux.HandleFunc("/apiws/connect", s.handleConnectLanding)
+		mux.HandleFunc("/apiws/identity", s.withClientAuth(s.handleIdentity))
 	}
 	return mux
 }
@@ -108,6 +112,9 @@ func (s *Server) ListenAndServe() error {
 func (s *Server) ListenAndServeContext(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if err := s.control.prepareIdentity(); err != nil {
+		return err
 	}
 	s.topology.start(ctx)
 	httpServer := &http.Server{
@@ -182,19 +189,45 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
+	instanceID, identityPersistent := s.control.instanceIdentity()
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(struct {
-		Name           string `json:"name"`
-		Version        string `json:"version"`
-		Protocol       int    `json:"protocol"`
-		MinAppProtocol int    `json:"minAppProtocol"`
-		OwnerProtocol  int    `json:"ownerProtocol"`
+		Name               string `json:"name"`
+		Version            string `json:"version"`
+		Protocol           int    `json:"protocol"`
+		MinAppProtocol     int    `json:"minAppProtocol"`
+		OwnerProtocol      int    `json:"ownerProtocol"`
+		InstanceID         string `json:"instanceId,omitempty"`
+		IdentityPersistent bool   `json:"identityPersistent"`
 	}{
-		Name:           Name,
-		Version:        Version,
-		Protocol:       Protocol,
-		MinAppProtocol: MinAppProtocol,
-		OwnerProtocol:  OwnerAPIProtocol,
+		Name:               Name,
+		Version:            Version,
+		Protocol:           Protocol,
+		MinAppProtocol:     MinAppProtocol,
+		OwnerProtocol:      OwnerAPIProtocol,
+		InstanceID:         instanceID,
+		IdentityPersistent: identityPersistent,
+	})
+}
+
+func (s *Server) handleIdentity(w http.ResponseWriter, r *http.Request, token config.Token) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	instanceID, persistent := s.control.instanceIdentity()
+	writeJSON(w, http.StatusOK, struct {
+		InstanceID           string `json:"instanceId"`
+		IdentityPersistent   bool   `json:"identityPersistent"`
+		AuthenticatedTokenID string `json:"authenticatedTokenId"`
+		Name                 string `json:"name"`
+		Version              string `json:"version"`
+		Protocol             int    `json:"protocol"`
+		OwnerProtocol        int    `json:"ownerProtocol"`
+	}{
+		InstanceID: instanceID, IdentityPersistent: persistent,
+		AuthenticatedTokenID: config.StableTokenID(token), Name: Name, Version: Version,
+		Protocol: Protocol, OwnerProtocol: OwnerAPIProtocol,
 	})
 }
 
@@ -214,21 +247,26 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		ProductionDCs []int  `json:"productionDcs"`
 		TestDCs       []int  `json:"testDcs"`
 	}
+	instanceID, identityPersistent := s.control.instanceIdentity()
 	writeJSON(w, http.StatusOK, struct {
-		Name             string        `json:"name"`
-		Version          string        `json:"version"`
-		Protocol         protocolRange `json:"protocol"`
-		WebSocket        []string      `json:"websocketSubprotocols"`
-		Features         []string      `json:"features"`
-		RouteDiagnostics string        `json:"routeDiagnostics"`
-		Topology         topologyView  `json:"topology"`
+		Name               string        `json:"name"`
+		Version            string        `json:"version"`
+		Protocol           protocolRange `json:"protocol"`
+		WebSocket          []string      `json:"websocketSubprotocols"`
+		Features           []string      `json:"features"`
+		RouteDiagnostics   string        `json:"routeDiagnostics"`
+		Topology           topologyView  `json:"topology"`
+		InstanceID         string        `json:"instanceId,omitempty"`
+		IdentityPersistent bool          `json:"identityPersistent"`
 	}{
 		Name: Name, Version: Version,
 		Protocol:  protocolRange{Min: MinAppProtocol, Max: MaxRelayProtocol},
 		WebSocket: []string{"tgproxy-relay.v2", "binary"},
 		Features: []string{"endpoint-fallback", "media-endpoints", "ipv4-ipv6",
-			"signed-topology-lkg", "owner-tokens", "owner-devices", "device-blocking"},
+			"signed-topology-lkg", "owner-tokens", "owner-devices", "device-blocking",
+			"instance-identity", "idempotent-owner-token-create"},
 		RouteDiagnostics: "tcp-preflight-only-client-must-prove-mtproto",
+		InstanceID:       instanceID, IdentityPersistent: identityPersistent,
 		Topology: topologyView{Source: s.topology.source(), Dynamic: s.topology.dynamic(),
 			Revision:      s.topology.revision(),
 			ProductionDCs: s.topology.configuredDCs(false),

@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Dushnyj/TG-Proxy-Relay/releases"><img alt="release" src="https://img.shields.io/badge/release-1.2.0-3390EC?style=for-the-badge"></a>
+  <a href="https://github.com/Dushnyj/TG-Proxy-Relay/releases"><img alt="release" src="https://img.shields.io/badge/release-1.3.0-3390EC?style=for-the-badge"></a>
   <img alt="Go 1.22" src="https://img.shields.io/badge/Go-1.22%2B-00ADD8?style=for-the-badge&logo=go&logoColor=white">
   <a href="https://github.com/Dushnyj/TG-Proxy-Relay/actions/workflows/ci.yml"><img alt="Relay CI" src="https://img.shields.io/github/actions/workflow/status/Dushnyj/TG-Proxy-Relay/ci.yml?branch=main&style=for-the-badge&label=CI"></a>
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-111827?style=for-the-badge"></a>
@@ -87,6 +87,11 @@ Client endpoints используют `Authorization: Bearer <client-token>`. Ow
 - отключить sessions одного устройства;
 - заблокировать/разблокировать installation ID;
 - увидеть модель, версии, first/last seen и приблизительные страну/город.
+
+Relay 1.3.0 выдаёт стабильный `instanceId`, поэтому Android объединяет несколько client tokens
+и публичных aliases одной установки, но не смешивает независимые VPS. Owner protocol 2 делает
+создание токена идемпотентным: повтор после сетевого сбоя возвращает тот же secret вместо
+дубликата.
 
 `admin.geoIpUrl` можно оставить пустым, чтобы не обращаться к внешнему GeoIP provider.
 

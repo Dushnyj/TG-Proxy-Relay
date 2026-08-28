@@ -17,9 +17,29 @@ func (s *Server) registerOwnerRoutes(mux *http.ServeMux, prefix string) {
 		return
 	}
 	base := strings.TrimSuffix(prefix, "/") + "/admin/v1"
+	mux.HandleFunc(base+"/info", s.withAdminAuth(s.handleOwnerInfo))
 	mux.HandleFunc(base+"/overview", s.withAdminAuth(s.handleOwnerOverview))
 	mux.HandleFunc(base+"/tokens", s.withAdminAuth(s.handleOwnerTokens))
 	mux.HandleFunc(base+"/tokens/", s.withAdminAuth(s.handleOwnerToken))
+}
+
+func (s *Server) handleOwnerInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	instanceID, persistent := s.control.instanceIdentity()
+	writeJSON(w, http.StatusOK, struct {
+		InstanceID         string `json:"instanceId"`
+		IdentityPersistent bool   `json:"identityPersistent"`
+		Name               string `json:"name"`
+		Version            string `json:"version"`
+		OwnerProtocol      int    `json:"ownerProtocol"`
+		PublicURL          string `json:"publicUrl,omitempty"`
+	}{
+		InstanceID: instanceID, IdentityPersistent: persistent, Name: Name,
+		Version: Version, OwnerProtocol: OwnerAPIProtocol, PublicURL: s.cfg.PublicURL,
+	})
 }
 
 func (s *Server) handleOwnerOverview(w http.ResponseWriter, r *http.Request) {
@@ -37,7 +57,9 @@ func (s *Server) handleOwnerTokens(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxControlBodyBytes)
 	var request struct {
-		Name string `json:"name"`
+		Name           string `json:"name"`
+		Secret         string `json:"secret,omitempty"`
+		IdempotencyKey string `json:"idempotencyKey,omitempty"`
 	}
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
@@ -49,10 +71,31 @@ func (s *Server) handleOwnerTokens(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	token, secret, err := s.control.createToken(request.Name)
+	headerKey := r.Header.Get("Idempotency-Key")
+	if headerKey != "" && request.IdempotencyKey != "" && headerKey != request.IdempotencyKey {
+		http.Error(w, "conflicting idempotency key", http.StatusBadRequest)
+		return
+	}
+	if request.IdempotencyKey == "" {
+		request.IdempotencyKey = headerKey
+	}
+	token, secret, replayed, err := s.control.createToken(
+		request.Name, request.Secret, request.IdempotencyKey)
 	if err != nil {
+		message := err.Error()
+		if strings.Contains(message, "invalid") || strings.Contains(message, "requires") {
+			http.Error(w, message, http.StatusBadRequest)
+			return
+		}
+		if strings.Contains(message, "idempotency key") {
+			http.Error(w, message, http.StatusConflict)
+			return
+		}
 		http.Error(w, "token could not be created", http.StatusInternalServerError)
 		return
+	}
+	if replayed {
+		w.Header().Set("Idempotency-Replayed", "true")
 	}
 	writeJSON(w, http.StatusCreated, createdTokenResponse{
 		Token:  tokenView{ID: token.ID, Name: token.Name, CreatedAt: token.CreatedAt},

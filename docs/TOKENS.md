@@ -1,7 +1,8 @@
 # Токены и права владельца
 
-Начиная с Relay `1.1.0`, сервер разделяет две роли; Relay `1.2.0` дополнительно поддерживает
-disconnect/block/unblock отдельного устройства:
+Начиная с Relay `1.1.0`, сервер разделяет две роли; Relay `1.3.0` дополнительно поддерживает
+disconnect/block/unblock отдельного устройства, stable instance identity и идемпотентное
+создание client token:
 
 - **client token** — WebSocket-трафик, `/healthz`, `/version`, `/capabilities`, `/test-routes`;
 - **owner token** — только `/admin/v1/*`: список, создание и отзыв client tokens,
@@ -55,8 +56,10 @@ Raw client token нужен Android-подключению. Raw owner token ну
 ## Управление из Android
 
 Если локальный профиль содержит зашифрованный owner token, кнопка управления владельца
-вызывает Owner API. Новый client token возвращается один раз, после чего Android сохраняет
-его локально в зашифрованном виде и может поделиться клиентским подключением.
+вызывает Owner API. Перед созданием Android сохраняет в Keystore client-generated secret и
+idempotency key; повтор после обрыва сети возвращает тот же token. После подтверждённого ответа
+Android сохраняет secret локально в зашифрованном виде и может поделиться только этим
+клиентским подключением.
 
 Импортированный обычный client token не открывает Owner API. Наличие SSH-реквизитов или
 создание Relay через мастер дают владельцу возможность восстановить/обновить owner-настройку,
@@ -68,7 +71,7 @@ Raw client token нужен Android-подключению. Raw owner token ну
 curl -X POST \
   -H "Authorization: Bearer <owner-token>" \
   -H "Content-Type: application/json" \
-  -d '{"name":"Телефон семьи"}' \
+  -d '{"name":"Телефон семьи","secret":"tgpr_<client-generated-secret>","idempotencyKey":"req_<stable-request-id>"}' \
   https://relay.example.com/apiws/admin/v1/tokens
 ```
 

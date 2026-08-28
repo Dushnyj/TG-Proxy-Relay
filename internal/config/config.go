@@ -26,12 +26,13 @@ const (
 )
 
 type Config struct {
-	Listen    string          `json:"listen"`
-	PublicURL string          `json:"publicUrl"`
-	Tokens    []Token         `json:"tokens"`
-	Admin     AdminConfig     `json:"admin"`
-	Telegram  TelegramConfig  `json:"telegram"`
-	WebSocket WebSocketConfig `json:"websocket"`
+	InstanceID string          `json:"instanceId,omitempty"`
+	Listen     string          `json:"listen"`
+	PublicURL  string          `json:"publicUrl"`
+	Tokens     []Token         `json:"tokens"`
+	Admin      AdminConfig     `json:"admin"`
+	Telegram   TelegramConfig  `json:"telegram"`
+	WebSocket  WebSocketConfig `json:"websocket"`
 }
 
 type Token struct {
@@ -182,6 +183,9 @@ func (c *Config) Validate() error {
 		return errors.New("timeouts and size limits must not be negative")
 	}
 	c.applyDefaults()
+	if strings.TrimSpace(c.InstanceID) != "" && !ValidInstanceID(c.InstanceID) {
+		return errors.New("instanceId must use ri_ followed by 32 to 64 lowercase hexadecimal characters")
+	}
 	if strings.TrimSpace(c.Listen) == "" {
 		return errors.New("listen is required")
 	}
@@ -258,9 +262,11 @@ func (c *Config) Validate() error {
 		return errors.New("websocket path must be a canonical absolute path without escapes, query, or fragment")
 	}
 	if c.WebSocket.Path == "/healthz" || c.WebSocket.Path == "/version" ||
+		c.WebSocket.Path == "/identity" ||
 		c.WebSocket.Path == "/capabilities" || c.WebSocket.Path == "/test-routes" || c.WebSocket.Path == "/connect" ||
 		c.WebSocket.Path == "/admin" || strings.HasPrefix(c.WebSocket.Path, "/admin/") ||
-		c.WebSocket.Path == "/apiws/connect" || c.WebSocket.Path == "/apiws/admin" ||
+		c.WebSocket.Path == "/apiws/connect" || c.WebSocket.Path == "/apiws/identity" ||
+		c.WebSocket.Path == "/apiws/admin" ||
 		strings.HasPrefix(c.WebSocket.Path, "/apiws/admin/") {
 		return errors.New("websocket path conflicts with a management endpoint")
 	}
@@ -280,6 +286,26 @@ func (c *Config) Validate() error {
 		return errors.New("websocket maxMessageBytes must be between 65536 and 67108864")
 	}
 	return nil
+}
+
+// ValidInstanceID validates the persistent, non-secret identity assigned to one Relay
+// installation. The value deliberately does not encode a public endpoint: domains, IPs and
+// TLS certificates may change while the Relay instance remains the same.
+func ValidInstanceID(value string) bool {
+	clean := strings.TrimSpace(value)
+	if !strings.HasPrefix(clean, "ri_") {
+		return false
+	}
+	hexPart := strings.TrimPrefix(clean, "ri_")
+	if len(hexPart) < 32 || len(hexPart) > 64 {
+		return false
+	}
+	for _, ch := range hexPart {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Config) AuthorizeBearer(header string) bool {

@@ -1,6 +1,6 @@
 # Telegram endpoint topology
 
-Relay 1.2.0 поддерживает legacy `dcMap`, несколько endpoints на DC и опциональный
+Relay 1.3.0 поддерживает legacy `dcMap`, несколько endpoints на DC и опциональный
 подписанный remote manifest. Android не передаёт произвольный destination: только
 `dc/media/test`; адрес всегда выбирает Relay из проверенной topology.
 
