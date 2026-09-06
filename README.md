@@ -6,10 +6,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Dushnyj/TG-Proxy-Relay/releases"><img alt="release" src="https://img.shields.io/badge/release-1.3.0-3390EC?style=for-the-badge"></a>
-  <img alt="Go 1.22" src="https://img.shields.io/badge/Go-1.22%2B-00ADD8?style=for-the-badge&logo=go&logoColor=white">
-  <a href="https://github.com/Dushnyj/TG-Proxy-Relay/actions/workflows/ci.yml"><img alt="Relay CI" src="https://img.shields.io/github/actions/workflow/status/Dushnyj/TG-Proxy-Relay/ci.yml?branch=main&style=for-the-badge&label=CI"></a>
-  <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-111827?style=for-the-badge"></a>
+  <a href="https://github.com/Dushnyj/TG-Proxy-Relay/releases/latest"><img alt="Последний релиз TG Proxy VPS Relay" src="https://img.shields.io/github/v/release/Dushnyj/TG-Proxy-Relay?display_name=tag&amp;sort=semver&amp;style=for-the-badge&amp;logo=github&amp;logoColor=white&amp;label=Release&amp;labelColor=223448&amp;color=896A35"></a>
+  &nbsp;
+  <a href="docs/VPS_REQUIREMENTS.md#linux-и-архитектуры"><img alt="Linux — 15 поддерживаемых архитектур" src="https://img.shields.io/badge/Linux-15%20architectures-315F85?style=for-the-badge&amp;logo=linux&amp;logoColor=white&amp;labelColor=223448"></a>
 </p>
 
 ![Схема TG Proxy VPS Relay](docs/assets/tg-proxy-relay-hero-v2.png)
