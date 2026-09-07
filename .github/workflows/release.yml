@@ -175,7 +175,7 @@ jobs:
           fi
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v3.0.2
+        uses: softprops/action-gh-release@v3.0.3
         with:
           tag_name: ${{ needs.check.outputs.tag }}
           name: TG Proxy VPS Relay v${{ needs.check.outputs.version }}
